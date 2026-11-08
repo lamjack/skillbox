@@ -547,8 +547,15 @@ test("released Skills protocol works with SDK v2 client, private manifests and l
     "io.modelcontextprotocol/clientInfo": { name: "native-fixture", version: "1" },
   };
   const rpc = async (method: string, params: Record<string, unknown> = {}, metadata: unknown = meta) => {
+    // Mirror the CLI bridge (cli/skillbox.mjs mcpRequestHeaders): a body envelope
+    // naming the protocol version must also send MCP-Protocol-Version.
+    const version =
+      metadata && typeof metadata === "object"
+        ? (metadata as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"]
+        : undefined;
     const response = await app.request("/mcp", {
       method: "POST", headers: { ...principalHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Method": method,
+        ...(typeof version === "string" ? { "MCP-Protocol-Version": version } : {}),
         ...(method === "resources/read" ? { "Mcp-Name": String(params.uri) } : {}),
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: metadata } }),
