@@ -4,6 +4,8 @@ import * as gateway from "./gateway";
 import { appOrigin as origin, allowedOrigins } from "./config";
 import { parseSkillIcon } from "../skill-icons";
 import { Hono } from "hono";
+import { stream } from "hono/streaming";
+import { listFiles, loadFiles } from "./revision-files";
 import { serveStatic } from "hono/bun";
 import { createHash } from "node:crypto";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
@@ -310,9 +312,7 @@ app.get("/api/settings/gitlab-import", async (c) => {
 app.put("/api/settings/gitlab-import", async (c) => {
   assertAdmin(c.get("principal"));
   return c.json(
-    await configureGitLabImport(
-      gitlabTokenInput.parse(await c.req.json()),
-    ),
+    await configureGitLabImport(gitlabTokenInput.parse(await c.req.json())),
   );
 });
 app.post("/api/imports/github/publish-batch", async (c) => {
@@ -445,18 +445,27 @@ app.get("/api/skills/:id/file", async (c) => {
   );
 });
 app.get("/api/skills/:id/bundle", async (c) => {
-  const r = await lib.revisionFor(
+  const r = await lib.revisionRow(
     c.get("principal"),
     c.req.param("id"),
     c.req.query("revision"),
   );
   await lib.record(c.get("principal"), "bundle", r.skillId, { revision: r.id });
-  return c.json({
-    format: "skillbox/v1",
-    id: r.skillId,
-    revision: r.id,
-    checksum: r.checksum,
-    files: r.files,
+  // Large packages are streamed file by file so memory stays per-file, not
+  // per-revision; the JSON shape is unchanged for clients.
+  const paths = (await listFiles(db, r.id)).map((f) => f.path);
+  c.header("Content-Type", "application/json; charset=utf-8");
+  return stream(c, async (out) => {
+    await out.write(
+      `{"format":"skillbox/v1","id":${JSON.stringify(r.skillId)},"revision":${JSON.stringify(r.id)},"checksum":${JSON.stringify(r.checksum)},"files":[`,
+    );
+    let first = true;
+    for (let i = 0; i < paths.length; i += 20)
+      for (const file of await loadFiles(db, r.id, paths.slice(i, i + 20))) {
+        await out.write((first ? "" : ",") + JSON.stringify(file));
+        first = false;
+      }
+    await out.write("]}");
   });
 });
 app.get("/api/skills/:id/history", async (c) =>
@@ -786,7 +795,9 @@ app.get("/api/analytics/usage", async (c) => {
       reportedUses: sql<number>`COUNT(*) FILTER (WHERE ${uses})::int`,
       lastReadAt: sql<string>`MAX(${events.createdAt}) FILTER (WHERE ${reads})`,
       lastUseAt: sql<string>`MAX(${events.createdAt}) FILTER (WHERE ${uses})`,
-      clients: sql<string[]>`ARRAY_AGG(DISTINCT ${events.clientName}) FILTER (WHERE ${events.clientName} IS NOT NULL AND ${events.createdAt} >= ${sinceIso})`,
+      clients: sql<
+        string[]
+      >`ARRAY_AGG(DISTINCT ${events.clientName}) FILTER (WHERE ${events.clientName} IS NOT NULL AND ${events.createdAt} >= ${sinceIso})`,
     })
     .from(skills)
     .leftJoin(events, eq(events.skillId, skills.id))
@@ -808,7 +819,10 @@ app.get("/api/analytics/usage", async (c) => {
       usesInWindow: rows.reduce((n, r) => n + Number(r.reportedUses), 0),
       activeClients: Number(count),
     },
-    skills: rows.map((r) => ({ ...r, clients: (r.clients ?? []).slice(0, 10) })),
+    skills: rows.map((r) => ({
+      ...r,
+      clients: (r.clients ?? []).slice(0, 10),
+    })),
   });
 });
 app.patch("/api/skills/:id/integrations", async (c) => {

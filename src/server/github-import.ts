@@ -6,6 +6,7 @@ import { excludedImportPath, hasEmbeddedSecret } from "../skill-import-safety";
 import type { SkillFile, GitHubSource } from "../shared";
 import { Problem, safePath, validateFiles, metadata } from "./library";
 import { claimImport } from "./import-limit";
+import { importBatchTimeoutMs } from "./config";
 import {
   importLimitMessage,
   importMaxBytes,
@@ -240,7 +241,7 @@ export async function prepareGitHubImport(
   const args = githubImportInput.parse(input);
   const target = parseGitHubUrl(args.url);
   const release = claimImport();
-  const deadline = AbortSignal.timeout(30_000);
+  const deadline = AbortSignal.timeout(importBatchTimeoutMs());
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
     const resolved = await resolveTarget(target, combined);
@@ -284,161 +285,158 @@ export async function assembleGitHubSkill(
   signal: AbortSignal,
 ) {
   const skipped: string[] = [];
-const entries = resolved.entries.filter((e) => {
-  if (!under(e.path, selected) || e.type === "tree") return false;
-  const relative = selected ? e.path.slice(selected.length + 1) : e.path;
-  if (excludedImportPath(relative)) {
-    skipped.push(relative);
-    return false;
+  const entries = resolved.entries.filter((e) => {
+    if (!under(e.path, selected) || e.type === "tree") return false;
+    const relative = selected ? e.path.slice(selected.length + 1) : e.path;
+    if (excludedImportPath(relative)) {
+      skipped.push(relative);
+      return false;
+    }
+    safePath(relative);
+    if (e.type !== "blob" || !["100644", "100755"].includes(e.mode))
+      throw new Problem(
+        400,
+        `Symlinks and submodules are not supported: ${relative}`,
+      );
+    if (
+      !SHA.test(e.sha) ||
+      !Number.isSafeInteger(e.size) ||
+      e.size! < 0 ||
+      e.size! > importMaxFileBytes()
+    )
+      throw new Problem(
+        413,
+        `File exceeds ${megabytes(importMaxFileBytes())} or has invalid metadata: ${relative}`,
+      );
+    return true;
+  });
+  if (
+    !entries.length ||
+    entries.length > importMaxFiles() ||
+    entries.reduce((n, e) => n + e.size!, 0) > importMaxBytes()
+  )
+    throw new Problem(413, importLimitMessage());
+  const files: SkillFile[] = new Array(entries.length);
+  let next = 0;
+  const cancel = new AbortController();
+  const downloads = AbortSignal.any([signal, cancel.signal]);
+  let failure: unknown;
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(4, entries.length) }, async () => {
+        for (;;) {
+          downloads.throwIfAborted();
+          const index = next++;
+          if (index >= entries.length) return;
+          try {
+            const entry = entries[index];
+            const response = await fetch(
+              `https://raw.githubusercontent.com/${target.repository}/${resolved.commit}/${encodePath(entry.path)}`,
+              { redirect: "error", signal: downloads },
+            );
+            if (!response.ok) {
+              await response.body?.cancel();
+              throw new Problem(502, "Could not download a pinned GitHub file");
+            }
+            const bytes = await boundedBytes(response, importMaxFileBytes());
+            if (
+              /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
+                bytes.subarray(0, 100).toString("utf8"),
+              )
+            )
+              throw new Problem(400, "Git LFS files are not supported");
+            const gitHash = createHash("sha1")
+              .update(`blob ${bytes.length}\0`)
+              .update(bytes)
+              .digest("hex");
+            if (bytes.length !== entry.size || gitHash !== entry.sha)
+              throw new Problem(
+                502,
+                "GitHub file does not match its pinned tree; Git LFS files are not supported",
+              );
+            const path = selected
+              ? entry.path.slice(selected.length + 1)
+              : entry.path;
+            if (hasEmbeddedSecret(bytes.toString("utf8")))
+              throw new Problem(
+                400,
+                `Possible embedded secret; import blocked: ${path}`,
+              );
+            files[index] = {
+              path,
+              content: bytes.toString("base64"),
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              size: bytes.length,
+              executable: entry.mode === "100755",
+            };
+          } catch (error) {
+            failure ??= error;
+            cancel.abort();
+            throw error;
+          }
+        }
+      }),
+    );
+  } catch (error) {
+    throw failure ?? error;
   }
-  safePath(relative);
-  if (e.type !== "blob" || !["100644", "100755"].includes(e.mode))
+  validateFiles(files);
+  const instructions = Buffer.from(
+    files.find((f) => f.path === "SKILL.md")!.content,
+    "base64",
+  ).toString("utf8");
+  let frontmatter;
+  try {
+    frontmatter = matter(instructions).data;
+  } catch {
+    throw new Problem(400, "Invalid SKILL.md YAML frontmatter");
+  }
+  const id = frontmatter?.name;
+  if (typeof id !== "string")
+    throw new Problem(400, "SKILL.md must declare a name");
+  const audit = inspectSkillPackage(
+    "00000000-0000-0000-0000-000000000000",
+    id,
+    files,
+  );
+  if (!audit.compatible)
     throw new Problem(
       400,
-      `Symlinks and submodules are not supported: ${relative}`,
+      "Invalid skill: " +
+        audit.issues
+          .filter((i) => i.severity === "error")
+          .map((i) => i.message)
+          .join(" "),
     );
+  const meta = metadata(id, files);
   if (
-    !SHA.test(e.sha) ||
-    !Number.isSafeInteger(e.size) ||
-    e.size! < 0 ||
-    e.size! > importMaxFileBytes()
+    meta.kind !== "skill" ||
+    meta.archived ||
+    meta.disabled ||
+    meta.replacement ||
+    meta.members.length
   )
     throw new Problem(
-      413,
-      `File exceeds ${megabytes(importMaxFileBytes())} or has invalid metadata: ${relative}`,
+      400,
+      "Imported skills cannot declare bundles, lifecycle controls or replacement targets",
     );
-  return true;
-});
-if (
-  !entries.length ||
-  entries.length > importMaxFiles() ||
-  entries.reduce((n, e) => n + e.size!, 0) > importMaxBytes()
-)
-  throw new Problem(413, importLimitMessage());
-const files: SkillFile[] = new Array(entries.length);
-let next = 0;
-const cancel = new AbortController();
-const downloads = AbortSignal.any([signal, cancel.signal]);
-let failure: unknown;
-try {
-  await Promise.all(
-    Array.from({ length: Math.min(4, entries.length) }, async () => {
-      for (;;) {
-        downloads.throwIfAborted();
-        const index = next++;
-        if (index >= entries.length) return;
-        try {
-          const entry = entries[index];
-          const response = await fetch(
-            `https://raw.githubusercontent.com/${target.repository}/${resolved.commit}/${encodePath(entry.path)}`,
-            { redirect: "error", signal: downloads },
-          );
-          if (!response.ok) {
-            await response.body?.cancel();
-            throw new Problem(
-              502,
-              "Could not download a pinned GitHub file",
-            );
-          }
-          const bytes = await boundedBytes(response, importMaxFileBytes());
-          if (
-            /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
-              bytes.subarray(0, 100).toString("utf8"),
-            )
-          )
-            throw new Problem(400, "Git LFS files are not supported");
-          const gitHash = createHash("sha1")
-            .update(`blob ${bytes.length}\0`)
-            .update(bytes)
-            .digest("hex");
-          if (bytes.length !== entry.size || gitHash !== entry.sha)
-            throw new Problem(
-              502,
-              "GitHub file does not match its pinned tree; Git LFS files are not supported",
-            );
-          const path = selected
-            ? entry.path.slice(selected.length + 1)
-            : entry.path;
-          if (hasEmbeddedSecret(bytes.toString("utf8")))
-            throw new Problem(
-              400,
-              `Possible embedded secret; import blocked: ${path}`,
-            );
-          files[index] = {
-            path,
-            content: bytes.toString("base64"),
-            sha256: createHash("sha256").update(bytes).digest("hex"),
-            size: bytes.length,
-            executable: entry.mode === "100755",
-          };
-        } catch (error) {
-          failure ??= error;
-          cancel.abort();
-          throw error;
-        }
-      }
-    }),
-  );
-} catch (error) {
-  throw failure ?? error;
-}
-validateFiles(files);
-const instructions = Buffer.from(
-  files.find((f) => f.path === "SKILL.md")!.content,
-  "base64",
-).toString("utf8");
-let frontmatter;
-try {
-  frontmatter = matter(instructions).data;
-} catch {
-  throw new Problem(400, "Invalid SKILL.md YAML frontmatter");
-}
-const id = frontmatter?.name;
-if (typeof id !== "string")
-  throw new Problem(400, "SKILL.md must declare a name");
-const audit = inspectSkillPackage(
-  "00000000-0000-0000-0000-000000000000",
-  id,
-  files,
-);
-if (!audit.compatible)
-  throw new Problem(
-    400,
-    "Invalid skill: " +
-      audit.issues
-        .filter((i) => i.severity === "error")
-        .map((i) => i.message)
-        .join(" "),
-  );
-const meta = metadata(id, files);
-if (
-  meta.kind !== "skill" ||
-  meta.archived ||
-  meta.disabled ||
-  meta.replacement ||
-  meta.members.length
-)
-  throw new Problem(
-    400,
-    "Imported skills cannot declare bundles, lifecycle controls or replacement targets",
-  );
-const source: GitHubSource = {
-  type: "github",
-  repository: target.repository,
-  commit: resolved.commit,
-  ref: resolved.ref,
-  path: selected,
-  url: sourceUrl(target.repository, resolved.commit, selected),
-};
-return {
-  kind: "skill" as const,
-  id,
-  source,
-  files,
-  instructions,
-  skipped,
-  warnings: audit.issues,
-};
+  const source: GitHubSource = {
+    type: "github",
+    repository: target.repository,
+    commit: resolved.commit,
+    ref: resolved.ref,
+    path: selected,
+    url: sourceUrl(target.repository, resolved.commit, selected),
+  };
+  return {
+    kind: "skill" as const,
+    id,
+    source,
+    files,
+    instructions,
+    skipped,
+    warnings: audit.issues,
+  };
 }
 export async function openGitHubBatch(url: string, signal: AbortSignal) {
   const target = parseGitHubUrl(url);

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db } from "./db";
+import { loadFiles } from "./revision-files";
 import { revisions, skills } from "./schema";
 import { claimImport } from "./import-limit";
 import { githubJson, githubRepoUnder } from "./github-import";
@@ -156,7 +157,7 @@ export async function checkImportUpdates() {
       .select({
         id: skills.id,
         source: revisions.source,
-        files: revisions.files,
+        revisionId: revisions.id,
       })
       .from(skills)
       .innerJoin(
@@ -254,7 +255,11 @@ export async function checkImportUpdates() {
       }
       for (const row of group.rows) {
         const source = row.source as GitHubSource | GitLabSource;
-        const compared = compareSkill(row.files, source.path, head.entries);
+        const compared = compareSkill(
+          await loadFiles(db, row.revisionId),
+          source.path,
+          head.entries,
+        );
         results.push({
           id: row.id,
           status: compared.status,

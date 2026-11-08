@@ -28,7 +28,10 @@ import {
   recommendSkills,
   archiveSkill,
 } from "../src/server/library";
-import { createRecommender, EvaluationUnavailable } from "../src/server/recommendations";
+import {
+  createRecommender,
+  EvaluationUnavailable,
+} from "../src/server/recommendations";
 import * as access from "../src/server/access";
 import { authenticate, createClient } from "../src/server/auth";
 import type { Principal } from "../src/shared";
@@ -59,8 +62,12 @@ beforeAll(async () => {
   await migrate();
   // The isolated test database starts with no content or third-party configuration.
   expect((await search(ADMIN)).items).toEqual([]);
-  expect(await (await import("../src/server/gateway")).gatewaySettings()).toMatchObject({ configured: false });
-  expect(await (await import("../src/server/executor")).executorSettings()).toMatchObject({ endpoint: "", authenticated: false });
+  expect(
+    await (await import("../src/server/gateway")).gatewaySettings(),
+  ).toMatchObject({ configured: false });
+  expect(
+    await (await import("../src/server/executor")).executorSettings(),
+  ).toMatchObject({ endpoint: "", authenticated: false });
   for (const id of ids) {
     const r = await publish(ADMIN, id, files(id), null);
     if (id === ids[0]) firstRevision = r.revision;
@@ -459,55 +466,122 @@ test("MCP Resources and manifest previews preserve grants, integrity and legacy 
   const legacyId = "test-legacy-" + randomUUID().slice(0, 8);
   ids.push(id, legacyId);
   const bytes = Buffer.from([0, 255, 42]);
-  const revision = await publish(ADMIN, id, [
-    ...files(id), makeFile("assets/data.bin", bytes),
-    makeFile("references/large.txt", "x".repeat(170_000)),
-  ], null);
-  await publish(ADMIN, legacyId, [makeFile("SKILL.md", "---\ndescription: Missing required name\n---\nLegacy")], null);
+  const revision = await publish(
+    ADMIN,
+    id,
+    [
+      ...files(id),
+      makeFile("assets/data.bin", bytes),
+      makeFile("references/large.txt", "x".repeat(170_000)),
+    ],
+    null,
+  );
+  await publish(
+    ADMIN,
+    legacyId,
+    [
+      makeFile(
+        "SKILL.md",
+        "---\ndescription: Missing required name\n---\nLegacy",
+      ),
+    ],
+    null,
+  );
   const client = await createClient("Resources fixture", "reader", false, [id]);
-  const rpc = async (method: string, params: unknown = {}, token = client.token) => (await (await app.request("/mcp", {
-    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  })).json());
-  const get = async (path: string, key = client.token) => app.request(path, { headers: { Authorization: "Bearer " + key } });
+  const rpc = async (
+    method: string,
+    params: unknown = {},
+    token = client.token,
+  ) =>
+    await (
+      await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      })
+    ).json();
+  const get = async (path: string, key = client.token) =>
+    app.request(path, { headers: { Authorization: "Bearer " + key } });
   try {
     const loaded = await load(ADMIN, id);
     const uri = skillResourceUri(loaded.referenceId, id);
-    const init = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "fixture", version: "1" } });
+    const init = await rpc("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "fixture", version: "1" },
+    });
     expect(init.result.capabilities.resources).toBeDefined();
-    expect(init.result.capabilities.extensions?.["io.modelcontextprotocol/skills"]).toBeUndefined();
+    expect(
+      init.result.capabilities.extensions?.["io.modelcontextprotocol/skills"],
+    ).toBeUndefined();
     const listing = await rpc("resources/list");
     expect(listing.result.resources.map((r: any) => r.uri)).toEqual([uri]);
-    expect((await rpc("resources/list", { cursor: "bad" })).error.code).toBe(-32602);
+    expect((await rpc("resources/list", { cursor: "bad" })).error.code).toBe(
+      -32602,
+    );
     const preview = await (await get(`/api/skills/${id}/manifest`)).json();
     expect(preview.revision).toBe(revision.revision);
     expect(preview.skill.resources).toHaveLength(4);
     const content = await rpc("resources/read", { uri });
-    expect(content.result.contents[0].text).toBe(Buffer.from(files(id)[0].content, "base64").toString("utf8"));
-    const blob = await rpc("resources/read", { uri: skillResourceUri(loaded.referenceId, id, "assets/data.bin") });
+    expect(content.result.contents[0].text).toBe(
+      Buffer.from(files(id)[0].content, "base64").toString("utf8"),
+    );
+    const blob = await rpc("resources/read", {
+      uri: skillResourceUri(loaded.referenceId, id, "assets/data.bin"),
+    });
     expect(Buffer.from(blob.result.contents[0].blob, "base64")).toEqual(bytes);
-    const large = await rpc("resources/read", { uri: skillResourceUri(loaded.referenceId, id, "references/large.txt") });
+    const large = await rpc("resources/read", {
+      uri: skillResourceUri(loaded.referenceId, id, "references/large.txt"),
+    });
     expect(large.result.contents[0].text).toHaveLength(170_000);
     const other = await load(ADMIN, legacyId);
-    for (const denied of [skillResourceUri(other.referenceId, legacyId), uri.replace(id, "wrong-name"), uri.replace("SKILL.md", "%2e%2e/SKILL.md")])
-      expect((await rpc("resources/read", { uri: denied })).error.code).toBe(-32602);
+    for (const denied of [
+      skillResourceUri(other.referenceId, legacyId),
+      uri.replace(id, "wrong-name"),
+      uri.replace("SKILL.md", "%2e%2e/SKILL.md"),
+    ])
+      expect((await rpc("resources/read", { uri: denied })).error.code).toBe(
+        -32602,
+      );
     expect((await get("/api/skill-compatibility")).status).toBe(403);
     expect((await get(`/api/skills/${legacyId}/manifest`)).status).toBe(404);
-    expect((await get(`/api/skills/${legacyId}/manifest`, process.env.SKILLBOX_ADMIN_TOKEN!)).status).toBe(422);
+    expect(
+      (
+        await get(
+          `/api/skills/${legacyId}/manifest`,
+          process.env.SKILLBOX_ADMIN_TOKEN!,
+        )
+      ).status,
+    ).toBe(422);
     const { compatibilityPage } = await import("../src/server/skill-resources");
     const auditItems = [];
-    for (let offset = 0;;) {
+    for (let offset = 0; ;) {
       const page = await compatibilityPage(ADMIN, offset);
       auditItems.push(...page.items);
       if (!page.hasMore) break;
       offset = page.nextOffset!;
     }
-    expect(auditItems.find((item) => item.id === legacyId)?.issues.some((issue) => issue.code === "name")).toBe(true);
+    expect(
+      auditItems
+        .find((item) => item.id === legacyId)
+        ?.issues.some((issue) => issue.code === "name"),
+    ).toBe(true);
     expect((await load(ADMIN, legacyId)).instructions).toContain("Legacy");
-    const changed = await publish(ADMIN, id, files(id, "Updated"), revision.revision);
+    const changed = await publish(
+      ADMIN,
+      id,
+      files(id, "Updated"),
+      revision.revision,
+    );
     const next = await (await get(`/api/skills/${id}/manifest`)).json();
     expect(next.skill.uri).toBe(uri);
-    expect(next.skill.resources[0].digest).not.toBe(preview.skill.resources[0].digest);
+    expect(next.skill.resources[0].digest).not.toBe(
+      preview.skill.resources[0].digest,
+    );
     const hidden = await setDisabled(ADMIN, id, true, changed.revision);
     expect((await rpc("resources/read", { uri })).error.code).toBe(-32602);
     expect((await rpc("resources/list")).result.resources).toEqual([]);
@@ -521,133 +595,303 @@ test("MCP Resources and manifest previews preserve grants, integrity and legacy 
 });
 
 test("released Skills protocol works with SDK v2 client, private manifests and legacy fallback", async () => {
-  const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+  const { Client, StreamableHTTPClientTransport } =
+    await import("@modelcontextprotocol/client");
   const { ResultSchema } = await import("@modelcontextprotocol/core");
   const { z } = await import("zod");
-  const { SKILLS_EXTENSION, skillResourceUri } = await import("../src/skill-manifest");
+  const { SKILLS_EXTENSION, skillResourceUri } =
+    await import("../src/skill-manifest");
   const id = "test-protocol-" + randomUUID().slice(0, 8);
   const hiddenId = "test-protocol-hidden-" + randomUUID().slice(0, 8);
   ids.push(id, hiddenId);
-  const extraIds = Array.from({ length: 25 }, (_, n) => `${id}-page-${n.toString().padStart(2, "0")}`);
+  const extraIds = Array.from(
+    { length: 25 },
+    (_, n) => `${id}-page-${n.toString().padStart(2, "0")}`,
+  );
   ids.push(...extraIds);
   const marker = "/tmp/skillbox-native-must-not-execute-" + randomUUID();
   const script = `#!/bin/sh\ntouch ${marker}\n`;
-  const published = await publish(ADMIN, id, [
-    ...files(id), makeFile("references/a #?%.md", "Exact reserved filename 🌋"),
-    makeFile("assets/picture.png", Buffer.from([0, 255, 1])),
-    makeFile("scripts/run.sh", script, true),
-  ], null);
+  const published = await publish(
+    ADMIN,
+    id,
+    [
+      ...files(id),
+      makeFile("references/a #?%.md", "Exact reserved filename 🌋"),
+      makeFile("assets/picture.png", Buffer.from([0, 255, 1])),
+      makeFile("scripts/run.sh", script, true),
+    ],
+    null,
+  );
   await publish(ADMIN, hiddenId, files(hiddenId), null);
   for (const entry of extraIds) await publish(ADMIN, entry, files(entry), null);
-  const credential = await createClient("Native protocol fixture", "reader", false, [id, ...extraIds]);
+  const credential = await createClient(
+    "Native protocol fixture",
+    "reader",
+    false,
+    [id, ...extraIds],
+  );
   const principalHeaders = { Authorization: "Bearer " + credential.token };
   const meta = {
     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-    "io.modelcontextprotocol/clientCapabilities": { extensions: { [SKILLS_EXTENSION]: {} } },
-    "io.modelcontextprotocol/clientInfo": { name: "native-fixture", version: "1" },
+    "io.modelcontextprotocol/clientCapabilities": {
+      extensions: { [SKILLS_EXTENSION]: {} },
+    },
+    "io.modelcontextprotocol/clientInfo": {
+      name: "native-fixture",
+      version: "1",
+    },
   };
-  const rpc = async (method: string, params: Record<string, unknown> = {}, metadata: unknown = meta) => {
+  const rpc = async (
+    method: string,
+    params: Record<string, unknown> = {},
+    metadata: unknown = meta,
+  ) => {
     // Mirror the CLI bridge (cli/skillbox.mjs mcpRequestHeaders): a body envelope
     // naming the protocol version must also send MCP-Protocol-Version.
     const version =
       metadata && typeof metadata === "object"
-        ? (metadata as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"]
+        ? (metadata as Record<string, unknown>)[
+            "io.modelcontextprotocol/protocolVersion"
+          ]
         : undefined;
     const response = await app.request("/mcp", {
-      method: "POST", headers: { ...principalHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Method": method,
-        ...(typeof version === "string" ? { "MCP-Protocol-Version": version } : {}),
-        ...(method === "resources/read" ? { "Mcp-Name": String(params.uri) } : {}),
+      method: "POST",
+      headers: {
+        ...principalHeaders,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "Mcp-Method": method,
+        ...(typeof version === "string"
+          ? { "MCP-Protocol-Version": version }
+          : {}),
+        ...(method === "resources/read"
+          ? { "Mcp-Name": String(params.uri) }
+          : {}),
       },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: metadata } }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method,
+        params: { ...params, _meta: metadata },
+      }),
     });
     return { status: response.status, body: await response.json() };
   };
   const entrySchema = z.object({
-    uri: z.string(), frontmatter: z.object({ name: z.string(), description: z.string() }).passthrough(),
-    resources: z.array(z.object({ uri: z.string(), digest: z.string(), size: z.number() })),
+    uri: z.string(),
+    frontmatter: z
+      .object({ name: z.string(), description: z.string() })
+      .passthrough(),
+    resources: z.array(
+      z.object({ uri: z.string(), digest: z.string(), size: z.number() }),
+    ),
   });
-  const listSchema = ResultSchema.extend({ skills: z.array(entrySchema), nextCursor: z.string().optional(), ttlMs: z.number(), cacheScope: z.literal("private") });
-  const getSchema = ResultSchema.extend({ skill: entrySchema, ttlMs: z.number(), cacheScope: z.literal("private") });
-  const client = new Client({ name: "skillbox-native-verifier", version: "1" }, {
-    versionNegotiation: { mode: { pin: "2026-07-28" } },
-    capabilities: { extensions: { [SKILLS_EXTENSION]: {} } },
+  const listSchema = ResultSchema.extend({
+    skills: z.array(entrySchema),
+    nextCursor: z.string().optional(),
+    ttlMs: z.number(),
+    cacheScope: z.literal("private"),
   });
+  const getSchema = ResultSchema.extend({
+    skill: entrySchema,
+    ttlMs: z.number(),
+    cacheScope: z.literal("private"),
+  });
+  const client = new Client(
+    { name: "skillbox-native-verifier", version: "1" },
+    {
+      versionNegotiation: { mode: { pin: "2026-07-28" } },
+      capabilities: { extensions: { [SKILLS_EXTENSION]: {} } },
+    },
+  );
   try {
     const discover = await rpc("server/discover");
-    expect({ status: discover.status, error: discover.body.error }).toEqual({ status: 200, error: undefined });
+    expect({ status: discover.status, error: discover.body.error }).toEqual({
+      status: 200,
+      error: undefined,
+    });
     expect(discover.body.result.resultType).toBe("complete");
-    expect(discover.body.result.capabilities.extensions[SKILLS_EXTENSION]).toEqual({});
+    expect(
+      discover.body.result.capabilities.extensions[SKILLS_EXTENSION],
+    ).toEqual({});
     expect(discover.body.result.capabilities.resources).toBeDefined();
-    expect(discover.body.result._meta["io.modelcontextprotocol/serverInfo"].name).toBe("skillbox");
+    expect(
+      discover.body.result._meta["io.modelcontextprotocol/serverInfo"].name,
+    ).toBe("skillbox");
     const address = skillResourceUri((await load(ADMIN, id)).referenceId, id);
     // Direct get works before listing; revisions are not part of stable identity.
     const direct = await rpc("skills/get", { uri: address });
     expect(direct.body.result.skill.uri).toBe(address);
-    expect(direct.body.result).toMatchObject({ resultType: "complete", ttlMs: 0, cacheScope: "private" });
-    const wrong = await rpc("skills/get", { uri: skillResourceUri((await load(ADMIN, hiddenId)).referenceId, hiddenId) });
+    expect(direct.body.result).toMatchObject({
+      resultType: "complete",
+      ttlMs: 0,
+      cacheScope: "private",
+    });
+    const wrong = await rpc("skills/get", {
+      uri: skillResourceUri(
+        (await load(ADMIN, hiddenId)).referenceId,
+        hiddenId,
+      ),
+    });
     expect(wrong.body.error.code).toBe(-32602);
-    expect((await rpc("skills/get", { uri: address.replace("SKILL.md", "scripts/run.sh") })).body.error.code).toBe(-32602);
-    expect((await rpc("skills/list", { cursor: "offset:Infinity" })).body.error.code).toBe(-32602);
-    const unsupported = await rpc("skills/list", {}, { ...meta, "io.modelcontextprotocol/protocolVersion": "1900-01-01" });
+    expect(
+      (
+        await rpc("skills/get", {
+          uri: address.replace("SKILL.md", "scripts/run.sh"),
+        })
+      ).body.error.code,
+    ).toBe(-32602);
+    expect(
+      (await rpc("skills/list", { cursor: "offset:Infinity" })).body.error.code,
+    ).toBe(-32602);
+    const unsupported = await rpc(
+      "skills/list",
+      {},
+      { ...meta, "io.modelcontextprotocol/protocolVersion": "1900-01-01" },
+    );
     expect(unsupported.status).toBe(400);
     expect(unsupported.body.error).toBeDefined();
-    const malformed = await rpc("skills/list", {}, { "io.modelcontextprotocol/protocolVersion": "2026-07-28" });
+    const malformed = await rpc(
+      "skills/list",
+      {},
+      { "io.modelcontextprotocol/protocolVersion": "2026-07-28" },
+    );
     expect(malformed.status).toBe(400);
-    await client.connect(new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
-      requestInit: { headers: principalHeaders },
-      fetch: async (input, init) => app.fetch(new Request(input, init)),
-    }));
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
+        requestInit: { headers: principalHeaders },
+        fetch: async (input, init) => app.fetch(new Request(input, init)),
+      }),
+    );
     expect(client.getProtocolEra()).toBe("modern");
     const catalog = await client.request({ method: "skills/list" }, listSchema);
     expect(catalog.skills).toHaveLength(25);
     expect(catalog.nextCursor).toBeDefined();
-    const remaining = await client.request({ method: "skills/list", params: { cursor: catalog.nextCursor } }, listSchema);
+    const remaining = await client.request(
+      { method: "skills/list", params: { cursor: catalog.nextCursor } },
+      listSchema,
+    );
     expect(remaining.skills).toHaveLength(1);
     expect(remaining.nextCursor).toBeUndefined();
-    expect(new Set([...catalog.skills, ...remaining.skills].map((s) => s.uri)).size).toBe(26);
-    const entry = (await client.request({ method: "skills/get", params: { uri: address } }, getSchema)).skill;
+    expect(
+      new Set([...catalog.skills, ...remaining.skills].map((s) => s.uri)).size,
+    ).toBe(26);
+    const entry = (
+      await client.request(
+        { method: "skills/get", params: { uri: address } },
+        getSchema,
+      )
+    ).skill;
     for (const resource of entry.resources) {
       const read = await client.readResource({ uri: resource.uri });
       const content = read.contents[0];
-      const bytes = "text" in content ? Buffer.from(content.text as string) : Buffer.from(content.blob as string, "base64");
+      const bytes =
+        "text" in content
+          ? Buffer.from(content.text as string)
+          : Buffer.from(content.blob as string, "base64");
       expect(bytes.length).toBe(resource.size);
-      expect("sha256:" + (await import("../src/server/library")).sha256(bytes)).toBe(resource.digest);
+      expect(
+        "sha256:" + (await import("../src/server/library")).sha256(bytes),
+      ).toBe(resource.digest);
       const wire = await rpc("resources/read", { uri: resource.uri });
-      expect(wire.body.result).toMatchObject({ resultType: "complete", ttlMs: 0, cacheScope: "private" });
-      if (resource.uri.endsWith("picture.png")) expect(content.mimeType).toBe("image/png");
+      expect(wire.body.result).toMatchObject({
+        resultType: "complete",
+        ttlMs: 0,
+        cacheScope: "private",
+      });
+      if (resource.uri.endsWith("picture.png"))
+        expect(content.mimeType).toBe("image/png");
     }
     expect(await Bun.file(marker).exists()).toBe(false);
     expect((await client.listTools()).tools).toHaveLength(5);
-    const legacyTool = await client.callTool({ name: "load_skill", arguments: { id } });
+    const legacyTool = await client.callTool({
+      name: "load_skill",
+      arguments: { id },
+    });
     expect(legacyTool.isError).not.toBe(true);
-    const next = await publish(ADMIN, id, files(id, "Changed content"), published.revision);
-    const changed = await client.request({ method: "skills/get", params: { uri: address } }, getSchema);
+    const next = await publish(
+      ADMIN,
+      id,
+      files(id, "Changed content"),
+      published.revision,
+    );
+    const changed = await client.request(
+      { method: "skills/get", params: { uri: address } },
+      getSchema,
+    );
     expect(changed.skill.uri).toBe(entry.uri);
     expect(changed.skill.resources).not.toEqual(entry.resources);
     await setDisabled(ADMIN, id, true, next.revision);
-    expect((await rpc("skills/get", { uri: address })).body.error.code).toBe(-32602);
-    expect((await rpc("resources/read", { uri: address })).body.error.code).toBe(-32602);
+    expect((await rpc("skills/get", { uri: address })).body.error.code).toBe(
+      -32602,
+    );
+    expect(
+      (await rpc("resources/read", { uri: address })).body.error.code,
+    ).toBe(-32602);
     // The stdio CLI remains a transparent bridge for the modern envelope.
-    const loopback = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: app.fetch });
+    const loopback = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: app.fetch,
+    });
     try {
       const child = Bun.spawn([process.execPath, "cli/skillbox.mjs", "mcp"], {
-        env: { ...process.env, SKILLBOX_CONFIG: "/tmp/skillbox-no-config", SKILLBOX_URL: `http://127.0.0.1:${loopback.port}`, SKILLBOX_TOKEN: credential.token },
-        stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        env: {
+          ...process.env,
+          SKILLBOX_CONFIG: "/tmp/skillbox-no-config",
+          SKILLBOX_URL: `http://127.0.0.1:${loopback.port}`,
+          SKILLBOX_TOKEN: credential.token,
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
       });
-      child.stdin.write([
-        { jsonrpc: "2.0", id: 7, method: "server/discover", params: { _meta: meta } },
-        { jsonrpc: "2.0", id: 8, method: "skills/list", params: { _meta: { ...meta, "io.modelcontextprotocol/protocolVersion": "1900-01-01" } } },
-      ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+      child.stdin.write(
+        [
+          {
+            jsonrpc: "2.0",
+            id: 7,
+            method: "server/discover",
+            params: { _meta: meta },
+          },
+          {
+            jsonrpc: "2.0",
+            id: 8,
+            method: "skills/list",
+            params: {
+              _meta: {
+                ...meta,
+                "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+              },
+            },
+          },
+        ]
+          .map((message) => JSON.stringify(message))
+          .join("\n") + "\n",
+      );
       child.stdin.end();
       const text = await new Response(child.stdout).text();
       expect(await child.exited).toBe(0);
-      const replies = text.trim().split("\n").map((line) => JSON.parse(line));
-      expect(replies[0].result.capabilities.extensions[SKILLS_EXTENSION]).toEqual({});
+      const replies = text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        replies[0].result.capabilities.extensions[SKILLS_EXTENSION],
+      ).toEqual({});
       expect(replies[1].id).toBe(8);
       expect(replies[1].error.code).toBe(unsupported.body.error.code);
-    } finally { loopback.stop(true); }
-    const [stored] = await db.select().from(clients).where(eq(clients.id, credential.id));
-    await db.update(profiles).set({ skillIds: [], allSkills: false }).where(eq(profiles.id, stored.profileId));
+    } finally {
+      loopback.stop(true);
+    }
+    const [stored] = await db
+      .select()
+      .from(clients)
+      .where(eq(clients.id, credential.id));
+    await db
+      .update(profiles)
+      .set({ skillIds: [], allSkills: false })
+      .where(eq(profiles.id, stored.profileId));
     expect((await rpc("skills/list")).body.result.skills).toEqual([]);
   } finally {
     await client.close();
@@ -952,11 +1196,16 @@ test("recommendation failures use unchanged deterministic search pagination", as
   expect(invalid.status).toBe(400);
 });
 test("Gateway key requires owner Settings, stays encrypted and invalidates model/cache on replacement/removal", async () => {
-  const { gatewaySettings, configureGateway, gatewayRecommender } = await import("../src/server/gateway");
+  const { gatewaySettings, configureGateway, gatewayRecommender } =
+    await import("../src/server/gateway");
   const previousFetch = globalThis.fetch;
   const previousEnv = process.env.AI_GATEWAY_API_KEY;
-  const ownerHeaders = { Authorization: `Bearer ${process.env.SKILLBOX_ADMIN_TOKEN}`, "Content-Type": "application/json" };
-  const principal = () => authenticate(new Request("http://localhost/", { headers: headers() }));
+  const ownerHeaders = {
+    Authorization: `Bearer ${process.env.SKILLBOX_ADMIN_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+  const principal = () =>
+    authenticate(new Request("http://localhost/", { headers: headers() }));
   let calls = 0;
   let seenKey = "";
   let removeDuringCall = false;
@@ -965,46 +1214,104 @@ test("Gateway key requires owner Settings, stays encrypted and invalidates model
     seenKey = new Headers(init?.headers).get("Authorization") ?? "";
     const body = JSON.parse(String(init?.body));
     if (removeDuringCall) await configureGateway({ apiKey: null });
-    return Response.json({ answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "score", score: 4 }])) });
+    return Response.json({
+      answers: Object.fromEntries(
+        Object.keys(body.questions).map((id) => [
+          id,
+          { type: "score", score: 4 },
+        ]),
+      ),
+    });
   }) as typeof fetch;
   try {
     await configureGateway({ apiKey: null });
     process.env.AI_GATEWAY_API_KEY = "ignored-environment-fixture";
     const missing = await recommendSkills(principal, { task: "Quality" });
-    expect(missing).toMatchObject({ method: "search", fallbackReason: "not_configured" });
+    expect(missing).toMatchObject({
+      method: "search",
+      fallbackReason: "not_configured",
+    });
     expect(calls).toBe(0);
     for (const method of ["GET", "PUT"]) {
-      const denied = await app.request("/api/settings/ai-gateway", { method, headers: { ...headers(), "Content-Type": "application/json" }, ...(method === "PUT" ? { body: JSON.stringify({ apiKey: "fixture-key" }) } : {}) });
+      const denied = await app.request("/api/settings/ai-gateway", {
+        method,
+        headers: { ...headers(), "Content-Type": "application/json" },
+        ...(method === "PUT"
+          ? { body: JSON.stringify({ apiKey: "fixture-key" }) }
+          : {}),
+      });
       expect(denied.status).toBe(403);
     }
-    expect((await app.request("/api/settings/ai-gateway", { method: "PUT", headers: ownerHeaders, body: JSON.stringify({ apiKey: " " }) })).status).toBe(400);
-    const saved = await app.request("/api/settings/ai-gateway", { method: "PUT", headers: ownerHeaders, body: JSON.stringify({ apiKey: "fixture-key-one" }) });
+    expect(
+      (
+        await app.request("/api/settings/ai-gateway", {
+          method: "PUT",
+          headers: ownerHeaders,
+          body: JSON.stringify({ apiKey: " " }),
+        })
+      ).status,
+    ).toBe(400);
+    const saved = await app.request("/api/settings/ai-gateway", {
+      method: "PUT",
+      headers: ownerHeaders,
+      body: JSON.stringify({ apiKey: "fixture-key-one" }),
+    });
     expect(saved.status).toBe(200);
     expect(await saved.json()).toMatchObject({ configured: true });
-    const status = await app.request("/api/settings/ai-gateway", { headers: ownerHeaders });
+    const status = await app.request("/api/settings/ai-gateway", {
+      headers: ownerHeaders,
+    });
     expect(await status.json()).not.toHaveProperty("apiKey");
-    const stored = await connection`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
+    const stored =
+      await connection`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
     expect(JSON.stringify(stored)).not.toContain("fixture-key-one");
     const one = await recommendSkills(principal, { task: "Quality" });
     expect(one.method).toBe("jev");
     expect(seenKey).toBe("Bearer fixture-key-one");
-    expect((await recommendSkills(principal, { task: "Quality" })).cacheHit).toBe(true);
+    expect(
+      (await recommendSkills(principal, { task: "Quality" })).cacheHit,
+    ).toBe(true);
     expect(calls).toBe(1);
     const firstVersion = (await gatewaySettings()).revision;
     await configureGateway({ apiKey: "fixture-key-two" });
     expect((await gatewaySettings()).revision).not.toBe(firstVersion);
-    expect((await recommendSkills(principal, { task: "Quality" })).cacheHit).toBe(false);
+    expect(
+      (await recommendSkills(principal, { task: "Quality" })).cacheHit,
+    ).toBe(false);
     expect(seenKey).toBe("Bearer fixture-key-two");
     expect(calls).toBe(2);
     const oldEngine = await gatewayRecommender();
     await configureGateway({ apiKey: null });
-    const stale = await oldEngine.rank({ catalog: async () => ({ scope: "fixture", candidates: [{ id: "fixture", referenceId: "uuid", revision: "revision", description: "Quality" }] }), search: async () => ({ items: [], hasMore: false, nextOffset: null }) }, { task: "Quality" });
-    expect(stale).toMatchObject({ method: "search", fallbackReason: "configuration_changed" });
+    const stale = await oldEngine.rank(
+      {
+        catalog: async () => ({
+          scope: "fixture",
+          candidates: [
+            {
+              id: "fixture",
+              referenceId: "uuid",
+              revision: "revision",
+              description: "Quality",
+            },
+          ],
+        }),
+        search: async () => ({ items: [], hasMore: false, nextOffset: null }),
+      },
+      { task: "Quality" },
+    );
+    expect(stale).toMatchObject({
+      method: "search",
+      fallbackReason: "configuration_changed",
+    });
     expect(calls).toBe(2);
-    expect((await recommendSkills(principal, { task: "Quality" })).method).toBe("search");
+    expect((await recommendSkills(principal, { task: "Quality" })).method).toBe(
+      "search",
+    );
     await configureGateway({ apiKey: "fixture-key-three" });
     removeDuringCall = true;
-    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject({ method: "search", fallbackReason: "catalog_changed" });
+    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject(
+      { method: "search", fallbackReason: "catalog_changed" },
+    );
     expect((await gatewaySettings()).configured).toBe(false);
   } finally {
     globalThis.fetch = previousFetch;
@@ -1014,11 +1321,13 @@ test("Gateway key requires owner Settings, stays encrypted and invalidates model
   }
 });
 test("provider switching preserves separate encrypted keys, migrates Gateway settings and invalidates cache", async () => {
-  const { gatewaySettings, configureGateway } = await import("../src/server/gateway");
+  const { gatewaySettings, configureGateway } =
+    await import("../src/server/gateway");
   const { seal } = await import("../src/server/secret-storage");
   const previousFetch = globalThis.fetch;
   const requests: Array<{ url: string; auth: string | null }> = [];
-  const principal = () => authenticate(new Request("http://localhost/", { headers: headers() }));
+  const principal = () =>
+    authenticate(new Request("http://localhost/", { headers: headers() }));
   globalThis.fetch = (async (url, init) => {
     const h = new Headers(init?.headers);
     const body = JSON.parse(String(init?.body));
@@ -1028,42 +1337,115 @@ test("provider switching preserves separate encrypted keys, migrates Gateway set
       expect(body.model).toBe("jev-latest");
     } else expect(body).not.toHaveProperty("model");
     requests.push({ url: String(url), auth: h.get("authorization") });
-    return Response.json({ model: "jev-latest", answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "score", score: 4, confidence: 0.95 }])), usage: direct ? { input_tokens: 100, output_tokens: 10 } : { inputTokens: 100, outputTokens: 10 } });
+    return Response.json({
+      model: "jev-latest",
+      answers: Object.fromEntries(
+        Object.keys(body.questions).map((id) => [
+          id,
+          { type: "score", score: 4, confidence: 0.95 },
+        ]),
+      ),
+      usage: direct
+        ? { input_tokens: 100, output_tokens: 10 }
+        : { inputTokens: 100, outputTokens: 10 },
+    });
   }) as typeof fetch;
   try {
     await connection`UPDATE workspace_settings SET value=${JSON.stringify(await seal({ revision: "legacy-gateway-fixture", apiKey: "fixture-vercel-key" }))}::jsonb WHERE id='ai_gateway'`;
-    expect(await gatewaySettings()).toMatchObject({ provider: "vercel", configured: true, providers: { typesafe: { configured: false } } });
-    expect((await recommendSkills(principal, { task: "Quality" })).provider).toBe("vercel");
+    expect(await gatewaySettings()).toMatchObject({
+      provider: "vercel",
+      configured: true,
+      providers: { typesafe: { configured: false } },
+    });
+    expect(
+      (await recommendSkills(principal, { task: "Quality" })).provider,
+    ).toBe("vercel");
     await configureGateway({ provider: "typesafe" });
-    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject({ provider: "typesafe", method: "search", fallbackReason: "not_configured" });
+    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject(
+      {
+        provider: "typesafe",
+        method: "search",
+        fallbackReason: "not_configured",
+      },
+    );
     expect(requests.length).toBe(1); // Never send the saved Gateway key to TypeSafe.
-    await configureGateway({ provider: "typesafe", apiKey: "fixture-typesafe-key" });
-    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject({ provider: "typesafe", method: "jev", cacheHit: false });
-    expect(requests.at(-1)).toEqual({ url: "https://api.typesafe.ai/v1/systemone", auth: "Bearer fixture-typesafe-key" });
-    expect((await recommendSkills(principal, { task: "Quality" })).cacheHit).toBe(true);
+    await configureGateway({
+      provider: "typesafe",
+      apiKey: "fixture-typesafe-key",
+    });
+    expect(await recommendSkills(principal, { task: "Quality" })).toMatchObject(
+      { provider: "typesafe", method: "jev", cacheHit: false },
+    );
+    expect(requests.at(-1)).toEqual({
+      url: "https://api.typesafe.ai/v1/systemone",
+      auth: "Bearer fixture-typesafe-key",
+    });
+    expect(
+      (await recommendSkills(principal, { task: "Quality" })).cacheHit,
+    ).toBe(true);
     await configureGateway({ provider: "vercel" });
-    expect((await recommendSkills(principal, { task: "Quality" })).cacheHit).toBe(false);
+    expect(
+      (await recommendSkills(principal, { task: "Quality" })).cacheHit,
+    ).toBe(false);
     expect(requests.at(-1)?.auth).toBe("Bearer fixture-vercel-key");
     await configureGateway({ provider: "typesafe", apiKey: null });
-    expect(await gatewaySettings()).toMatchObject({ provider: "typesafe", configured: false, providers: { vercel: { configured: true }, typesafe: { configured: false } } });
-    await Promise.all([configureGateway({ provider: "vercel", apiKey: "fixture-vercel-new" }), configureGateway({ provider: "typesafe", apiKey: "fixture-typesafe-new" })]);
+    expect(await gatewaySettings()).toMatchObject({
+      provider: "typesafe",
+      configured: false,
+      providers: {
+        vercel: { configured: true },
+        typesafe: { configured: false },
+      },
+    });
+    await Promise.all([
+      configureGateway({ provider: "vercel", apiKey: "fixture-vercel-new" }),
+      configureGateway({
+        provider: "typesafe",
+        apiKey: "fixture-typesafe-new",
+      }),
+    ]);
     await configureGateway({ provider: "typesafe" });
     await configureGateway({ apiKey: "fixture-legacy-gateway" });
     const status = await gatewaySettings();
     expect(status.provider).toBe("vercel"); // Old Gateway-only clients never retarget keys to TypeSafe.
     expect(status.providers).toEqual({
       vercel: { configured: true, updatedAt: expect.stringMatching(/^\d{4}-/) },
-      typesafe: { configured: true, updatedAt: expect.stringMatching(/^\d{4}-/) },
+      typesafe: {
+        configured: true,
+        updatedAt: expect.stringMatching(/^\d{4}-/),
+      },
       openrouter: { configured: false, updatedAt: null },
     });
     await configureGateway({ provider: "openrouter" });
-    expect(await gatewaySettings()).toMatchObject({ provider: "openrouter", configured: false });
-    await configureGateway({ provider: "openrouter", apiKey: "fixture-openrouter-key" });
-    expect(await gatewaySettings()).toMatchObject({ provider: "openrouter", configured: true, providers: { vercel: { configured: true }, typesafe: { configured: true }, openrouter: { configured: true } } });
+    expect(await gatewaySettings()).toMatchObject({
+      provider: "openrouter",
+      configured: false,
+    });
+    await configureGateway({
+      provider: "openrouter",
+      apiKey: "fixture-openrouter-key",
+    });
+    expect(await gatewaySettings()).toMatchObject({
+      provider: "openrouter",
+      configured: true,
+      providers: {
+        vercel: { configured: true },
+        typesafe: { configured: true },
+        openrouter: { configured: true },
+      },
+    });
     expect(JSON.stringify(status)).not.toContain("fixture-");
-    const stored = await connection`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
+    const stored =
+      await connection`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
     expect(JSON.stringify(stored)).not.toContain("fixture-");
-    const invalid = await app.request("/api/settings/ai-gateway", { method: "PUT", headers: { Authorization: `Bearer ${process.env.SKILLBOX_ADMIN_TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ provider: "unknown" }) });
+    const invalid = await app.request("/api/settings/ai-gateway", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${process.env.SKILLBOX_ADMIN_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ provider: "unknown" }),
+    });
     expect(invalid.status).toBe(400);
   } finally {
     globalThis.fetch = previousFetch;
@@ -1110,26 +1492,26 @@ test("only explicitly configured origins pass; cross-origin mutations fail", asy
   process.env.SKILLBOX_ORIGIN = "https://skills.example.com";
   process.env.SKILLBOX_ALLOWED_ORIGINS = "https://legacy-skills.example.com";
   try {
-  for (const origin of [
-    "https://skills.example.com",
-    "https://legacy-skills.example.com",
-  ]) {
-    const response = await app.request("/api/login", {
+    for (const origin of [
+      "https://skills.example.com",
+      "https://legacy-skills.example.com",
+    ]) {
+      const response = await app.request("/api/login", {
+        method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ key: "invalid-key-for-origin-check" }),
+      });
+      expect(response.status).toBe(401);
+    }
+    const r = await app.request("/api/login", {
       method: "POST",
-      headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "invalid-key-for-origin-check" }),
+      headers: {
+        Origin: "https://evil.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ key: "test" }),
     });
-    expect(response.status).toBe(401);
-  }
-  const r = await app.request("/api/login", {
-    method: "POST",
-    headers: {
-      Origin: "https://evil.example",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ key: "test" }),
-  });
-  expect(r.status).toBe(403);
+    expect(r.status).toBe(403);
   } finally {
     if (oldOrigin === undefined) delete process.env.SKILLBOX_ORIGIN;
     else process.env.SKILLBOX_ORIGIN = oldOrigin;
@@ -1312,6 +1694,8 @@ test("Executor credentials stay encrypted and only owners can configure endpoint
   await configureExecutor("https://changed.example.com/mcp");
   expect((await executorSettings()).authenticated).toBe(false);
   await disconnectExecutor();
+  // Leave the shared database as empty as this file found it for later runs.
+  await connection`DELETE FROM workspace_settings WHERE id='executor'`;
 });
 
 test("Executor cross-origin resource aliases require explicit deployment configuration", async () => {
@@ -1319,13 +1703,38 @@ test("Executor cross-origin resource aliases require explicit deployment configu
   const previous = process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES;
   delete process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES;
   try {
-    await expect(validateExecutorResource("https://executor.example.com/mcp", "https://legacy.example.com")).rejects.toThrow();
-    process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES = JSON.stringify({ "https://executor.example.com/mcp": "https://legacy.example.com/" });
-    expect((await validateExecutorResource("https://executor.example.com/mcp", "https://legacy.example.com")).origin).toBe("https://legacy.example.com");
-    await expect(validateExecutorResource("https://other.example.com/mcp", "https://legacy.example.com")).rejects.toThrow();
-    await expect(validateExecutorResource("https://other.example.com/mcp", "https://other.example.com/wrong-resource")).rejects.toThrow();
+    await expect(
+      validateExecutorResource(
+        "https://executor.example.com/mcp",
+        "https://legacy.example.com",
+      ),
+    ).rejects.toThrow();
+    process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES = JSON.stringify({
+      "https://executor.example.com/mcp": "https://legacy.example.com/",
+    });
+    expect(
+      (
+        await validateExecutorResource(
+          "https://executor.example.com/mcp",
+          "https://legacy.example.com",
+        )
+      ).origin,
+    ).toBe("https://legacy.example.com");
+    await expect(
+      validateExecutorResource(
+        "https://other.example.com/mcp",
+        "https://legacy.example.com",
+      ),
+    ).rejects.toThrow();
+    await expect(
+      validateExecutorResource(
+        "https://other.example.com/mcp",
+        "https://other.example.com/wrong-resource",
+      ),
+    ).rejects.toThrow();
   } finally {
-    if (previous === undefined) delete process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES;
+    if (previous === undefined)
+      delete process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES;
     else process.env.SKILLBOX_EXECUTOR_RESOURCE_ALIASES = previous;
   }
 });

@@ -78,6 +78,11 @@ export function createMcp(
     try {
       return await operation();
     } catch (error) {
+      if (error instanceof library.Problem && error.status === 413)
+        throw new ProtocolError(
+          ProtocolErrorCode.InvalidParams,
+          error.message,
+        );
       if (
         error instanceof library.Problem &&
         [400, 404, 422].includes(error.status)

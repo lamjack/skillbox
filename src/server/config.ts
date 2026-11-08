@@ -92,6 +92,10 @@ export function importBatchTimeoutMs(): number {
   return envPositiveInt("SKILLBOX_IMPORT_BATCH_TIMEOUT_MS", 180_000);
 }
 
+export function mcpResourceMaxBytes(): number {
+  return envPositiveInt("SKILLBOX_MCP_RESOURCE_MAX_BYTES", 8_000_000);
+}
+
 export function megabytes(bytes: number): string {
   const value = bytes / 1_000_000;
   return `${Number.isInteger(value) ? value : value.toFixed(1)} MB`;

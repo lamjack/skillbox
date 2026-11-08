@@ -2,6 +2,7 @@ import { packageMetrics } from "../package-metrics";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "./schema";
+import { loadFiles, storeFiles, storeProposalFiles } from "./revision-files";
 export const connection = postgres(
   process.env.DATABASE_URL ?? "postgres://localhost/skillbox",
   { max: 8, onnotice: () => {} },
@@ -12,9 +13,25 @@ export async function migrate() {
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'skill', ADD COLUMN IF NOT EXISTS members jsonb NOT NULL DEFAULT '[]', ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS replacement text`;
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS disabled boolean NOT NULL DEFAULT false`;
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS icon jsonb`;
-  await connection`CREATE TABLE IF NOT EXISTS revisions (id text PRIMARY KEY,skill_id text NOT NULL REFERENCES skills(id),metadata jsonb NOT NULL,files jsonb NOT NULL,checksum text NOT NULL,message text NOT NULL,author text NOT NULL,created_at timestamptz NOT NULL DEFAULT now())`;
+  await connection`CREATE TABLE IF NOT EXISTS revisions (id text PRIMARY KEY,skill_id text NOT NULL REFERENCES skills(id),metadata jsonb NOT NULL,checksum text NOT NULL,message text NOT NULL,author text NOT NULL,created_at timestamptz NOT NULL DEFAULT now())`;
   await connection`ALTER TABLE revisions ADD COLUMN IF NOT EXISTS source jsonb`;
   await connection`CREATE INDEX IF NOT EXISTS revisions_skill_idx ON revisions(skill_id)`;
+  await connection`CREATE TABLE IF NOT EXISTS blobs (sha256 text PRIMARY KEY,size integer NOT NULL,content bytea NOT NULL)`;
+  await connection`CREATE TABLE IF NOT EXISTS revision_files (revision_id text NOT NULL REFERENCES revisions(id) ON DELETE CASCADE,path text NOT NULL,sha256 text NOT NULL REFERENCES blobs(sha256),size integer NOT NULL,executable boolean NOT NULL,PRIMARY KEY (revision_id,path))`;
+  // Legacy deployments stored every file in one revisions.files jsonb column.
+  const [legacyColumn] =
+    await connection`SELECT 1 AS present FROM information_schema.columns WHERE table_name='revisions' AND column_name='files'`;
+  if (legacyColumn) {
+    const pending =
+      await connection`SELECT id FROM revisions r WHERE NOT EXISTS(SELECT 1 FROM revision_files f WHERE f.revision_id=r.id)`;
+    for (const row of pending) {
+      // One revision per transaction keeps each backfill bounded.
+      const [legacy] =
+        await connection`SELECT files FROM revisions WHERE id=${row.id}`;
+      await db.transaction(async (tx) => storeFiles(tx, row.id, legacy.files));
+    }
+    await connection`ALTER TABLE revisions DROP COLUMN files`;
+  }
   await connection`CREATE INDEX IF NOT EXISTS skills_search_idx ON skills USING gin(to_tsvector('english',search_text))`;
   await connection`CREATE TABLE IF NOT EXISTS clients (id text PRIMARY KEY,name text NOT NULL,token_hash text NOT NULL UNIQUE,role text NOT NULL DEFAULT 'reader',all_skills boolean NOT NULL DEFAULT false,skill_ids jsonb NOT NULL DEFAULT '[]',active boolean NOT NULL DEFAULT true,created_at timestamptz NOT NULL DEFAULT now())`;
   await connection`CREATE TABLE IF NOT EXISTS profiles (id text PRIMARY KEY,name text NOT NULL,all_skills boolean NOT NULL DEFAULT false,skill_ids jsonb NOT NULL DEFAULT '[]',permissions jsonb NOT NULL,version text NOT NULL DEFAULT gen_random_uuid()::text)`;
@@ -46,7 +63,22 @@ export async function migrate() {
     }
   });
   await connection`ALTER TABLE clients ALTER COLUMN profile_id SET NOT NULL`;
-  await connection`CREATE TABLE IF NOT EXISTS proposals (id text PRIMARY KEY,skill_id text NOT NULL,client_id text NOT NULL,client_name text NOT NULL,expected_revision text NOT NULL,files jsonb NOT NULL,message text NOT NULL,status text NOT NULL DEFAULT 'pending',created_at timestamptz NOT NULL DEFAULT now(),reviewed_at timestamptz,reviewer text,published_revision text)`;
+  await connection`CREATE TABLE IF NOT EXISTS proposals (id text PRIMARY KEY,skill_id text NOT NULL,client_id text NOT NULL,client_name text NOT NULL,expected_revision text NOT NULL,message text NOT NULL,status text NOT NULL DEFAULT 'pending',created_at timestamptz NOT NULL DEFAULT now(),reviewed_at timestamptz,reviewer text,published_revision text)`;
+  await connection`CREATE TABLE IF NOT EXISTS proposal_files (proposal_id text NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,path text NOT NULL,sha256 text NOT NULL REFERENCES blobs(sha256),size integer NOT NULL,executable boolean NOT NULL,PRIMARY KEY (proposal_id,path))`;
+  const [legacyProposalColumn] =
+    await connection`SELECT 1 AS present FROM information_schema.columns WHERE table_name='proposals' AND column_name='files'`;
+  if (legacyProposalColumn) {
+    const pending =
+      await connection`SELECT id FROM proposals p WHERE NOT EXISTS(SELECT 1 FROM proposal_files f WHERE f.proposal_id=p.id)`;
+    for (const row of pending) {
+      const [legacy] =
+        await connection`SELECT files FROM proposals WHERE id=${row.id}`;
+      await db.transaction(async (tx) =>
+        storeProposalFiles(tx, row.id, legacy.files),
+      );
+    }
+    await connection`ALTER TABLE proposals DROP COLUMN files`;
+  }
   await connection`CREATE TABLE IF NOT EXISTS sessions (hash text PRIMARY KEY,expires_at timestamptz NOT NULL)`;
   await connection`CREATE TABLE IF NOT EXISTS events (id text PRIMARY KEY,client_id text NOT NULL,client_name text NOT NULL,operation text NOT NULL,skill_id text,created_at timestamptz NOT NULL DEFAULT now())`;
   await connection`CREATE INDEX IF NOT EXISTS events_skill_access_idx ON events(skill_id, created_at DESC) WHERE operation IN ('load', 'read_file', 'bundle')`;
@@ -54,9 +86,9 @@ export async function migrate() {
   await connection`CREATE TABLE IF NOT EXISTS workspace_settings (id text PRIMARY KEY, value jsonb NOT NULL)`;
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS package_metrics jsonb`;
   const unmeasured =
-    await connection`SELECT s.id,s.revision,r.files FROM skills s JOIN revisions r ON r.id=s.revision WHERE s.package_metrics IS NULL`;
+    await connection`SELECT s.id,s.revision FROM skills s JOIN revisions r ON r.id=s.revision WHERE s.package_metrics IS NULL`;
   for (const row of unmeasured)
-    await connection`UPDATE skills SET package_metrics=${JSON.stringify(packageMetrics(row.files))}::jsonb WHERE id=${row.id} AND revision=${row.revision}`;
+    await connection`UPDATE skills SET package_metrics=${JSON.stringify(packageMetrics(await loadFiles(db, row.revision)))}::jsonb WHERE id=${row.id} AND revision=${row.revision}`;
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS reference_id text NOT NULL DEFAULT gen_random_uuid()::text`;
   await connection`CREATE UNIQUE INDEX IF NOT EXISTS skills_reference_id_idx ON skills(reference_id)`;
 }

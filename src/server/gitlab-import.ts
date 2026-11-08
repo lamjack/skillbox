@@ -6,6 +6,7 @@ import { excludedImportPath, hasEmbeddedSecret } from "../skill-import-safety";
 import type { SkillFile, GitLabSource } from "../shared";
 import { Problem, safePath, validateFiles, metadata } from "./library";
 import { claimImport } from "./import-limit";
+import { importBatchTimeoutMs } from "./config";
 import {
   gitlabHost,
   importLimitMessage,
@@ -37,8 +38,7 @@ type Target = {
 
 export function parseGitLabUrl(value: string): Target {
   const host = gitlabHost();
-  if (!host)
-    throw new Problem(404, "GitLab import is not configured");
+  if (!host) throw new Problem(404, "GitLab import is not configured");
   return parseGitLabUrlOnHost(value, host);
 }
 export function parseGitLabUrlOnHost(value: string, host: string): Target {
@@ -80,7 +80,11 @@ export function parseGitLabUrlOnHost(value: string, host: string): Target {
   if (dash === -1) return { project, kind: "repo", segments: [] };
   const kind = parts[dash + 1];
   const segments = parts.slice(dash + 2);
-  if ((kind !== "tree" && kind !== "blob") || !segments.length || segments.length > 20)
+  if (
+    (kind !== "tree" && kind !== "blob") ||
+    !segments.length ||
+    segments.length > 20
+  )
     throw new Problem(400, "Use a project, tree folder, or SKILL.md file URL");
   if (kind === "blob" && segments.at(-1) !== "SKILL.md")
     throw new Problem(400, "File URLs must point to SKILL.md");
@@ -154,7 +158,12 @@ export async function gitlabJson(
     (await boundedBytes(response, apiResponseLimit())).toString("utf8"),
   );
 }
-const sourceUrl = (host: string, project: string, commit: string, path: string) =>
+const sourceUrl = (
+  host: string,
+  project: string,
+  commit: string,
+  path: string,
+) =>
   `https://${host}/${project}/-/tree/${commit}${path ? "/" + encodeURIComponent(path).replace(/%2F/g, "/") : ""}`;
 async function resolveTarget(
   host: string,
@@ -272,7 +281,7 @@ export async function prepareGitLabImport(
   const host = gitlabHost()!;
   const token = await gitlabImportToken();
   const release = claimImport();
-  const deadline = AbortSignal.timeout(30_000);
+  const deadline = AbortSignal.timeout(importBatchTimeoutMs());
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const base = `/api/v4/projects/${encodeURIComponent(target.project)}`;
   try {
@@ -299,7 +308,14 @@ export async function prepareGitLabImport(
         400,
         "Choose a skill directory from this project or folder",
       );
-    return assembleGitLabSkill(host, target, resolved, selected, combined, token);
+    return assembleGitLabSkill(
+      host,
+      target,
+      resolved,
+      selected,
+      combined,
+      token,
+    );
   } catch (error) {
     if (error instanceof Problem) throw error;
     if (combined.aborted)
@@ -318,164 +334,160 @@ export async function assembleGitLabSkill(
   signal: AbortSignal,
   token: string | null,
 ) {
-const base = `/api/v4/projects/${encodeURIComponent(target.project)}`;
-const skipped: string[] = [];
-const entries = resolved.entries.filter((e) => {
-  if (!under(e.path, selected) || e.type === "tree") return false;
-  const relative = selected ? e.path.slice(selected.length + 1) : e.path;
-  if (excludedImportPath(relative)) {
-    skipped.push(relative);
-    return false;
+  const base = `/api/v4/projects/${encodeURIComponent(target.project)}`;
+  const skipped: string[] = [];
+  const entries = resolved.entries.filter((e) => {
+    if (!under(e.path, selected) || e.type === "tree") return false;
+    const relative = selected ? e.path.slice(selected.length + 1) : e.path;
+    if (excludedImportPath(relative)) {
+      skipped.push(relative);
+      return false;
+    }
+    safePath(relative);
+    // mode 120000 is a symlink; 160000/type commit is a submodule.
+    if (e.type !== "blob" || !["100644", "100755"].includes(e.mode))
+      throw new Problem(
+        400,
+        `Symlinks and submodules are not supported: ${relative}`,
+      );
+    if (!SHA.test(e.id))
+      throw new Problem(502, `Invalid GitLab file metadata: ${relative}`);
+    return true;
+  });
+  if (!entries.length || entries.length > importMaxFiles())
+    throw new Problem(413, importLimitMessage());
+  const files: SkillFile[] = new Array(entries.length);
+  let next = 0,
+    total = 0;
+  const cancel = new AbortController();
+  const downloads = AbortSignal.any([signal, cancel.signal]);
+  let failure: unknown;
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(4, entries.length) }, async () => {
+        for (;;) {
+          downloads.throwIfAborted();
+          const index = next++;
+          if (index >= entries.length) return;
+          try {
+            const entry = entries[index];
+            const response = await gitlabFetch(
+              host,
+              `${base}/repository/files/${encodeURIComponent(entry.path)}/raw?ref=${encodeURIComponent(resolved.commit)}`,
+              downloads,
+              token,
+            );
+            if (!response.ok) {
+              await response.body?.cancel();
+              throw new Problem(502, "Could not download a pinned GitLab file");
+            }
+            const bytes = await boundedBytes(response, importMaxFileBytes());
+            total += bytes.length;
+            if (total > importMaxBytes())
+              throw new Problem(413, importLimitMessage());
+            if (
+              /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
+                bytes.subarray(0, 100).toString("utf8"),
+              )
+            )
+              throw new Problem(400, "Git LFS files are not supported");
+            const gitHash = createHash("sha1")
+              .update(`blob ${bytes.length}\0`)
+              .update(bytes)
+              .digest("hex");
+            if (gitHash !== entry.id)
+              throw new Problem(
+                502,
+                "GitLab file does not match its pinned tree; Git LFS files are not supported",
+              );
+            const path = selected
+              ? entry.path.slice(selected.length + 1)
+              : entry.path;
+            if (hasEmbeddedSecret(bytes.toString("utf8")))
+              throw new Problem(
+                400,
+                `Possible embedded secret; import blocked: ${path}`,
+              );
+            files[index] = {
+              path,
+              content: bytes.toString("base64"),
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              size: bytes.length,
+              executable: entry.mode === "100755",
+            };
+          } catch (error) {
+            failure ??= error;
+            cancel.abort();
+            throw error;
+          }
+        }
+      }),
+    );
+  } catch (error) {
+    throw failure ?? error;
   }
-  safePath(relative);
-  // mode 120000 is a symlink; 160000/type commit is a submodule.
-  if (e.type !== "blob" || !["100644", "100755"].includes(e.mode))
+  validateFiles(files);
+  const instructions = Buffer.from(
+    files.find((f) => f.path === "SKILL.md")!.content,
+    "base64",
+  ).toString("utf8");
+  let frontmatter;
+  try {
+    frontmatter = matter(instructions).data;
+  } catch {
+    throw new Problem(400, "Invalid SKILL.md YAML frontmatter");
+  }
+  const id = frontmatter?.name;
+  if (typeof id !== "string")
+    throw new Problem(400, "SKILL.md must declare a name");
+  const audit = inspectSkillPackage(
+    "00000000-0000-0000-0000-000000000000",
+    id,
+    files,
+  );
+  if (!audit.compatible)
     throw new Problem(
       400,
-      `Symlinks and submodules are not supported: ${relative}`,
+      "Invalid skill: " +
+        audit.issues
+          .filter((i) => i.severity === "error")
+          .map((i) => i.message)
+          .join(" "),
     );
-  if (!SHA.test(e.id))
-    throw new Problem(502, `Invalid GitLab file metadata: ${relative}`);
-  return true;
-});
-if (!entries.length || entries.length > importMaxFiles())
-  throw new Problem(413, importLimitMessage());
-const files: SkillFile[] = new Array(entries.length);
-let next = 0,
-  total = 0;
-const cancel = new AbortController();
-const downloads = AbortSignal.any([signal, cancel.signal]);
-let failure: unknown;
-try {
-  await Promise.all(
-    Array.from({ length: Math.min(4, entries.length) }, async () => {
-      for (;;) {
-        downloads.throwIfAborted();
-        const index = next++;
-        if (index >= entries.length) return;
-        try {
-          const entry = entries[index];
-          const response = await gitlabFetch(
-            host,
-            `${base}/repository/files/${encodeURIComponent(entry.path)}/raw?ref=${encodeURIComponent(resolved.commit)}`,
-            downloads,
-            token,
-          );
-          if (!response.ok) {
-            await response.body?.cancel();
-            throw new Problem(
-              502,
-              "Could not download a pinned GitLab file",
-            );
-          }
-          const bytes = await boundedBytes(response, importMaxFileBytes());
-          total += bytes.length;
-          if (total > importMaxBytes())
-            throw new Problem(413, importLimitMessage());
-          if (
-            /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
-              bytes.subarray(0, 100).toString("utf8"),
-            )
-          )
-            throw new Problem(400, "Git LFS files are not supported");
-          const gitHash = createHash("sha1")
-            .update(`blob ${bytes.length}\0`)
-            .update(bytes)
-            .digest("hex");
-          if (gitHash !== entry.id)
-            throw new Problem(
-              502,
-              "GitLab file does not match its pinned tree; Git LFS files are not supported",
-            );
-          const path = selected
-            ? entry.path.slice(selected.length + 1)
-            : entry.path;
-          if (hasEmbeddedSecret(bytes.toString("utf8")))
-            throw new Problem(
-              400,
-              `Possible embedded secret; import blocked: ${path}`,
-            );
-          files[index] = {
-            path,
-            content: bytes.toString("base64"),
-            sha256: createHash("sha256").update(bytes).digest("hex"),
-            size: bytes.length,
-            executable: entry.mode === "100755",
-          };
-        } catch (error) {
-          failure ??= error;
-          cancel.abort();
-          throw error;
-        }
-      }
-    }),
-  );
-} catch (error) {
-  throw failure ?? error;
-}
-validateFiles(files);
-const instructions = Buffer.from(
-  files.find((f) => f.path === "SKILL.md")!.content,
-  "base64",
-).toString("utf8");
-let frontmatter;
-try {
-  frontmatter = matter(instructions).data;
-} catch {
-  throw new Problem(400, "Invalid SKILL.md YAML frontmatter");
-}
-const id = frontmatter?.name;
-if (typeof id !== "string")
-  throw new Problem(400, "SKILL.md must declare a name");
-const audit = inspectSkillPackage(
-  "00000000-0000-0000-0000-000000000000",
-  id,
-  files,
-);
-if (!audit.compatible)
-  throw new Problem(
-    400,
-    "Invalid skill: " +
-      audit.issues
-        .filter((i) => i.severity === "error")
-        .map((i) => i.message)
-        .join(" "),
-  );
-const meta = metadata(id, files);
-if (
-  meta.kind !== "skill" ||
-  meta.archived ||
-  meta.disabled ||
-  meta.replacement ||
-  meta.members.length
-)
-  throw new Problem(
-    400,
-    "Imported skills cannot declare bundles, lifecycle controls or replacement targets",
-  );
-const source: GitLabSource = {
-  type: "gitlab",
-  host,
-  repository: target.project,
-  commit: resolved.commit,
-  ref: resolved.ref,
-  path: selected,
-  url: sourceUrl(host, target.project, resolved.commit, selected),
-};
-return {
-  kind: "skill" as const,
-  id,
-  source,
-  files,
-  instructions,
-  skipped,
-  warnings: audit.issues,
-};
+  const meta = metadata(id, files);
+  if (
+    meta.kind !== "skill" ||
+    meta.archived ||
+    meta.disabled ||
+    meta.replacement ||
+    meta.members.length
+  )
+    throw new Problem(
+      400,
+      "Imported skills cannot declare bundles, lifecycle controls or replacement targets",
+    );
+  const source: GitLabSource = {
+    type: "gitlab",
+    host,
+    repository: target.project,
+    commit: resolved.commit,
+    ref: resolved.ref,
+    path: selected,
+    url: sourceUrl(host, target.project, resolved.commit, selected),
+  };
+  return {
+    kind: "skill" as const,
+    id,
+    source,
+    files,
+    instructions,
+    skipped,
+    warnings: audit.issues,
+  };
 }
 export async function openGitLabBatch(url: string, signal: AbortSignal) {
   const host = gitlabHost();
-  if (!host)
-    throw new Problem(404, "GitLab import is not configured");
+  if (!host) throw new Problem(404, "GitLab import is not configured");
   const target = parseGitLabUrl(url);
   const token = await gitlabImportToken();
   const release = claimImport();
