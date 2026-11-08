@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Plug, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { api } from "./api";
 import { GatewaySettings } from "./gateway-settings";
+import { GitLabImportSettings } from "./gitlab-settings";
+import { SecretField } from "./secret-field";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 type Integration = {
@@ -13,7 +15,6 @@ type Integration = {
 export function ExecutorSettings() {
   const [config, setConfig] = useState<any>(null),
     [endpoint, setEndpoint] = useState(""),
-    [bearer, setBearer] = useState(""),
     [items, setItems] = useState<Integration[]>([]),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -49,6 +50,7 @@ export function ExecutorSettings() {
         <h1>Settings</h1>
       </header>
       <GatewaySettings />
+      <GitLabImportSettings />
       <section className="executor-settings">
         <h2>
           <Plug size={20} /> Executor
@@ -63,12 +65,25 @@ export function ExecutorSettings() {
         </label>
         <details>
           <summary>Use an access token</summary>
-          <Input
-            aria-label="Executor access token"
-            type="password"
-            autoComplete="off"
-            value={bearer}
-            onChange={(e) => setBearer(e.target.value)}
+          <SecretField
+            label="Executor access token"
+            configured={config?.authMethod === "token"}
+            emptyPlaceholder="Paste token…"
+            disabled={!config?.endpoint}
+            onSave={async (value) => {
+              await api("/settings/executor", {
+                method: "PUT",
+                body: JSON.stringify({ endpoint: config.endpoint, bearer: value }),
+              });
+              await load();
+            }}
+            onRemove={async () => {
+              await api("/settings/executor", {
+                method: "PUT",
+                body: JSON.stringify({ endpoint: config.endpoint, bearer: "" }),
+              });
+              await load();
+            }}
           />
         </details>
         <div className="filters">
@@ -78,12 +93,8 @@ export function ExecutorSettings() {
               run(async () => {
                 await api("/settings/executor", {
                   method: "PUT",
-                  body: JSON.stringify({
-                    endpoint,
-                    ...(bearer ? { bearer } : {}),
-                  }),
+                  body: JSON.stringify({ endpoint }),
                 });
-                setBearer("");
                 await load();
               })
             }

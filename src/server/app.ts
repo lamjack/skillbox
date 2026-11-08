@@ -28,7 +28,23 @@ import {
   githubImportInput,
   parseGitHubUrl,
   prepareGitHubImport,
+  openGitHubBatch,
+  assembleGitHubSkill,
 } from "./github-import";
+import {
+  gitlabImportInput,
+  parseGitLabUrl,
+  openGitLabBatch,
+  assembleGitLabSkill,
+  prepareGitLabImport,
+} from "./gitlab-import";
+import { runImportBatch } from "./import-batch";
+import { checkImportUpdates } from "./import-updates";
+import {
+  gitlabImportSettings,
+  gitlabTokenInput,
+  configureGitLabImport,
+} from "./gitlab-settings";
 export const app = new Hono<{ Variables: { principal: Principal } }>();
 const loginAttempts: number[] = [];
 app.use("*", async (c, next) => {
@@ -238,6 +254,131 @@ app.post("/api/imports/github/publish", async (c) => {
       "Preview first; publishing requires a commit-pinned GitHub URL",
     );
   const prepared = await prepareGitHubImport(
+    { url: input.url },
+    c.req.raw.signal,
+  );
+  if (prepared.kind !== "skill" || prepared.id !== input.id)
+    throw new lib.Problem(400, "Preview and imported skill do not match");
+  const [existing] = await db
+    .select()
+    .from(skills)
+    .where(eq(skills.id, prepared.id));
+  if (
+    existing &&
+    (existing.kind !== "skill" || existing.disabled || existing.archived)
+  )
+    throw new lib.Problem(
+      409,
+      "Existing entry is a bundle, disabled or archived; resolve that before importing",
+    );
+  return c.json(
+    await lib.publish(
+      principal,
+      prepared.id,
+      prepared.files,
+      input.expectedRevision,
+      `Import ${prepared.source.repository}@${prepared.source.commit.slice(0, 12)}`,
+      undefined,
+      { source: prepared.source },
+    ),
+  );
+});
+app.post("/api/imports/gitlab/publish-batch", async (c) => {
+  const principal = c.get("principal");
+  assertAdmin(principal);
+  return c.json(
+    await runImportBatch(
+      await c.req.json(),
+      principal,
+      openGitLabBatch,
+      (ctx, path, signal) =>
+        assembleGitLabSkill(
+          ctx.host,
+          ctx.target,
+          ctx.resolved,
+          path,
+          signal,
+          ctx.token,
+        ),
+    ),
+  );
+});
+app.get("/api/settings/gitlab-import", async (c) => {
+  assertAdmin(c.get("principal"));
+  return c.json(await gitlabImportSettings());
+});
+app.put("/api/settings/gitlab-import", async (c) => {
+  assertAdmin(c.get("principal"));
+  return c.json(
+    await configureGitLabImport(
+      gitlabTokenInput.parse(await c.req.json()),
+    ),
+  );
+});
+app.post("/api/imports/github/publish-batch", async (c) => {
+  const principal = c.get("principal");
+  assertAdmin(principal);
+  return c.json(
+    await runImportBatch(
+      await c.req.json(),
+      principal,
+      openGitHubBatch,
+      (ctx, path, signal) =>
+        assembleGitHubSkill(ctx.target, ctx.resolved, path, signal),
+    ),
+  );
+});
+app.post("/api/imports/check-updates", async (c) => {
+  assertAdmin(c.get("principal"));
+  return c.json(await checkImportUpdates());
+});
+app.post("/api/imports/gitlab/preview", async (c) => {
+  const principal = c.get("principal");
+  assertAdmin(principal);
+  const prepared = await prepareGitLabImport(
+    gitlabImportInput.parse(await c.req.json()),
+    c.req.raw.signal,
+  );
+  if (prepared.kind === "catalog") return c.json(prepared);
+  const [existing] = await db
+    .select()
+    .from(skills)
+    .where(eq(skills.id, prepared.id));
+  if (
+    existing &&
+    (existing.kind !== "skill" || existing.disabled || existing.archived)
+  )
+    throw new lib.Problem(
+      409,
+      "Existing entry is a bundle, disabled or archived; resolve that before importing",
+    );
+  return c.json({
+    ...prepared,
+    files: prepared.files.map(({ content, ...file }) => file),
+    expectedRevision: existing?.revision ?? null,
+  });
+});
+app.post("/api/imports/gitlab/publish", async (c) => {
+  const principal = c.get("principal");
+  assertAdmin(principal);
+  const input = z
+    .object({
+      url: z.string().max(2048),
+      id: z.string().max(80),
+      expectedRevision: z.string().nullable(),
+    })
+    .strict()
+    .parse(await c.req.json());
+  const target = parseGitLabUrl(input.url);
+  if (
+    target.kind !== "tree" ||
+    !/^[0-9a-f]{40}$/.test(target.segments[0] ?? "")
+  )
+    throw new lib.Problem(
+      400,
+      "Preview first; publishing requires a commit-pinned GitLab URL",
+    );
+  const prepared = await prepareGitLabImport(
     { url: input.url },
     c.req.raw.signal,
   );
@@ -623,6 +764,52 @@ app.get("/api/events", async (c) => {
       .limit(100)
       .offset(q.offset),
   );
+});
+app.get("/api/analytics/usage", async (c) => {
+  assertAdmin(c.get("principal"));
+  const q = z
+    .object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+    })
+    .parse(c.req.query());
+  const since = new Date(Date.now() - q.days * 86400_000);
+  const sinceIso = since.toISOString();
+  const reads = sql`${events.operation} IN ('load','read_file','bundle') AND ${events.context}->>'source' IN ('mcp','cli') AND ${events.createdAt} >= ${sinceIso}`;
+  const uses = sql`${events.operation} = 'reported_use' AND ${events.createdAt} >= ${sinceIso}`;
+  const rows = await db
+    .select({
+      id: skills.id,
+      name: skills.title,
+      kind: skills.kind,
+      status: sql<string>`CASE WHEN ${skills.disabled} THEN 'disabled' ELSE 'enabled' END`,
+      reads: sql<number>`COUNT(*) FILTER (WHERE ${reads})::int`,
+      reportedUses: sql<number>`COUNT(*) FILTER (WHERE ${uses})::int`,
+      lastReadAt: sql<string>`MAX(${events.createdAt}) FILTER (WHERE ${reads})`,
+      lastUseAt: sql<string>`MAX(${events.createdAt}) FILTER (WHERE ${uses})`,
+      clients: sql<string[]>`ARRAY_AGG(DISTINCT ${events.clientName}) FILTER (WHERE ${events.clientName} IS NOT NULL AND ${events.createdAt} >= ${sinceIso})`,
+    })
+    .from(skills)
+    .leftJoin(events, eq(events.skillId, skills.id))
+    .where(and(eq(skills.kind, "skill"), eq(skills.archived, false)))
+    .groupBy(skills.id)
+    .orderBy(desc(sql`COUNT(*) FILTER (WHERE ${reads})`), skills.id);
+  const [{ count }] = await db
+    .select({
+      count: sql<number>`COUNT(DISTINCT ${events.clientName})::int`,
+    })
+    .from(events)
+    .where(sql`${events.createdAt} >= ${sinceIso}`);
+  return c.json({
+    window: { days: q.days, since: since.toISOString() },
+    totals: {
+      skills: rows.length,
+      neverRead: rows.filter((r) => !r.reads).length,
+      readsInWindow: rows.reduce((n, r) => n + Number(r.reads), 0),
+      usesInWindow: rows.reduce((n, r) => n + Number(r.reportedUses), 0),
+      activeClients: Number(count),
+    },
+    skills: rows.map((r) => ({ ...r, clients: (r.clients ?? []).slice(0, 10) })),
+  });
 });
 app.patch("/api/skills/:id/integrations", async (c) => {
   const body = z

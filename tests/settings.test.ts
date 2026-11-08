@@ -3,6 +3,7 @@ import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { app } from "../src/server/app";
 import { connection, migrate } from "../src/server/db";
 import { open, seal } from "../src/server/secret-storage";
 import {
@@ -126,5 +127,63 @@ test("setup creates unique private credentials without printing or overwriting t
     expect(await readFile(join(dir, ".env"), "utf8")).toBe(env);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("settings GET responses never return stored secrets and expose updatedAt", async () => {
+  await migrate();
+  const headers = {
+    Authorization: "Bearer " + process.env.SKILLBOX_ADMIN_TOKEN,
+    "Content-Type": "application/json",
+  };
+  const secrets = {
+    gateway: "sk-fixture-gateway-secret",
+    gitlab: "glpat-fixture-gitlab-secret",
+  };
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  try {
+    expect(
+      (
+        await app.request("/api/settings/ai-gateway", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({
+            provider: "vercel",
+            apiKey: secrets.gateway,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/api/settings/gitlab-import", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ token: secrets.gitlab }),
+        })
+      ).status,
+    ).toBe(200);
+    const gateway = await (
+      await app.request("/api/settings/ai-gateway", { headers })
+    ).json();
+    const gitlab = await (
+      await app.request("/api/settings/gitlab-import", { headers })
+    ).json();
+    for (const body of [gateway, gitlab])
+      for (const secret of Object.values(secrets))
+        expect(JSON.stringify(body)).not.toContain(secret);
+    expect(gateway.providers.vercel.updatedAt).toMatch(iso);
+    expect(gitlab.updatedAt).toMatch(iso);
+  } finally {
+    await app.request("/api/settings/ai-gateway", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ provider: "vercel", apiKey: null }),
+    });
+    await app.request("/api/settings/gitlab-import", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token: "" }),
+    });
   }
 });

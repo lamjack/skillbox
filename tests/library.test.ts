@@ -1051,7 +1051,11 @@ test("provider switching preserves separate encrypted keys, migrates Gateway set
     await configureGateway({ apiKey: "fixture-legacy-gateway" });
     const status = await gatewaySettings();
     expect(status.provider).toBe("vercel"); // Old Gateway-only clients never retarget keys to TypeSafe.
-    expect(status.providers).toEqual({ vercel: { configured: true }, typesafe: { configured: true }, openrouter: { configured: false } });
+    expect(status.providers).toEqual({
+      vercel: { configured: true, updatedAt: expect.stringMatching(/^\d{4}-/) },
+      typesafe: { configured: true, updatedAt: expect.stringMatching(/^\d{4}-/) },
+      openrouter: { configured: false, updatedAt: null },
+    });
     await configureGateway({ provider: "openrouter" });
     expect(await gatewaySettings()).toMatchObject({ provider: "openrouter", configured: false });
     await configureGateway({ provider: "openrouter", apiKey: "fixture-openrouter-key" });
@@ -1638,4 +1642,25 @@ test("legacy migration preserves key identity and exact grants, and is repeatabl
   } finally {
     await db.delete(clients).where(eq(clients.id, id));
   }
+});
+
+test("read_skill_file without revision returns the current revision's bytes", async () => {
+  const id = "test-readfile-current-" + randomUUID().slice(0, 8);
+  ids.push(id);
+  await publish(ADMIN, id, files(id), null, "Publish for read test");
+  const current = await revisionFor(ADMIN, id);
+  const lib = await import("../src/server/library");
+  const withRevision = await lib.readFile(ADMIN, id, current.id, "SKILL.md");
+  const without = await lib.readFile(ADMIN, id, undefined, "SKILL.md");
+  expect(without.text).toBe(withRevision.text);
+  const denied: Principal = {
+    id: "readfile-denied",
+    name: "Denied reader",
+    role: "reader",
+    allSkills: false,
+    skillIds: [],
+  };
+  await expect(
+    lib.readFile(denied, id, undefined, "SKILL.md"),
+  ).rejects.toThrow();
 });

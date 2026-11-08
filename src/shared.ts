@@ -4,26 +4,38 @@ export type GitHubSource = {
   type: "github";
   repository: string;
   commit: string;
+  ref?: string;
   path: string;
   url: string;
 };
+export type GitLabSource = {
+  type: "gitlab";
+  host: string;
+  repository: string;
+  commit: string;
+  ref?: string;
+  path: string;
+  url: string;
+};
+type ImportPreview = {
+  id: string;
+  instructions: string;
+  files: Omit<SkillFile, "content">[];
+  skipped: string[];
+  warnings: {
+    code: string;
+    path: string;
+    message: string;
+    severity: string;
+  }[];
+  expectedRevision: string | null;
+};
 export type GitHubImportPreview =
   | { kind: "catalog"; url: string; commit: string; candidates: string[] }
-  | {
-      kind: "skill";
-      id: string;
-      source: GitHubSource;
-      instructions: string;
-      files: Omit<SkillFile, "content">[];
-      skipped: string[];
-      warnings: {
-        code: string;
-        path: string;
-        message: string;
-        severity: string;
-      }[];
-      expectedRevision: string | null;
-    };
+  | (ImportPreview & { kind: "skill"; source: GitHubSource });
+export type GitLabImportPreview =
+  | { kind: "catalog"; url: string; commit: string; candidates: string[] }
+  | (ImportPreview & { kind: "skill"; source: GitLabSource });
 export type SkillFile = {
   path: string;
   content: string;

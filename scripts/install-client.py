@@ -2,7 +2,7 @@
 """Install bootstrap and MCP connections. Read per-client credentials as JSON on stdin.
 
 Usage: python3 scripts/install-client.py < protected-client-credentials.json
-Input: {"clients":{"codex":{"url":"https://...","token":"..."}, ...}}
+Input: {"clients":{"codex"|"claude"|"cursor"|"devin":{"url":"https://...","token":"..."}, ...}}
 Existing skills and unrelated MCP settings are preserved; backups are mode 0600.
 """
 import datetime, hashlib, json, os, re, shlex, shutil, subprocess, sys, urllib.request
@@ -12,7 +12,7 @@ import tomllib
 root=Path.home()
 payload=json.load(sys.stdin)
 credentials=payload['clients']
-assert credentials and set(credentials)<= {'codex','claude','cursor'}
+assert credentials and set(credentials)<= {'codex','claude','cursor','devin'}
 urls={c['url'].rstrip('/') for c in credentials.values()}
 assert len(urls)==1
 base=urls.pop()
@@ -40,7 +40,7 @@ def write(path,content,mode=0o600):
 def get(path):
     with urllib.request.urlopen(base+path,timeout=30) as response:
         assert response.geturl()==base+path,'Unexpected download redirect'
-        return response.read().decode()
+        return response.read()
 
 # --expected-checksums <path> substitutes a locally pinned checksums.json for
 # the server-published one (out-of-band verification channel).
@@ -56,9 +56,9 @@ assert expected.get('algorithm')=='sha256','Unsupported checksum algorithm'
 def verified(path):
     body=get(path)
     want=expected['files'][path.lstrip('/')]
-    got=hashlib.sha256(body.encode()).hexdigest()
+    got=hashlib.sha256(body).hexdigest()
     assert got==want,f'Checksum mismatch for {path} (expected {want}, got {got}) — aborting, nothing written'
-    return body
+    return body.decode()
 
 # Download and verify everything before any file is written.
 install=root/'.local/share/skillbox'
@@ -81,6 +81,15 @@ for client in credentials:
             content+='\n[mcp_servers.skillbox]\ncommand = '+json.dumps(runtime)+'\nargs = '+json.dumps(server['args'])+'\n\n[mcp_servers.skillbox.env]\nSKILLBOX_CONFIG = '+json.dumps(str(config))+'\n'
             tomllib.loads(content)
             write(path,content)
+    elif client=='devin':
+        path=root/'.config/devin/mcp_config.json'
+        data=json.loads(path.read_text()) if path.exists() else {}
+        servers=data.setdefault('mcpServers',{})
+        existing=servers.get('skillbox')
+        if existing and existing!=server:
+            raise SystemExit('Existing devin Skillbox settings differ; inspect before replacing')
+        servers['skillbox']=server
+        write(path,json.dumps(data,indent=2)+'\n')
     else:
         path=root/('.claude.json' if client=='claude' else '.cursor/mcp.json')
         data=json.loads(path.read_text()) if path.exists() else {}
@@ -108,10 +117,13 @@ for client in credentials:
     assert 'result' in messages[1] and 'result' in messages[2] and 'result' in messages[3],'MCP protocol check failed'
     catalog=messages[2]['result']['tools']
     index=json.loads(messages[3]['result']['content'][0]['text'])
-    assert len(catalog) in (4,5) and index['items'],'Empty skill catalog'
+    assert catalog and index['items'],'Empty skill catalog'
     print(json.dumps({'client':client,'stdio':'passed','tools':len(catalog),'skills':len(index['items'])}))
 default='codex' if 'codex' in credentials else next(iter(credentials))
 write(root/'.config/skillbox/config.json',json.dumps(credentials[default],indent=2)+'\n')
-wrapper='#!/bin/sh\nexec '+shlex.quote(runtime)+' '+shlex.quote(str(install/'skillbox.mjs'))+' "$@"\n'
+first=root/'.config/skillbox'/(next(iter(credentials))+'.json')
+wrapper='#!/bin/sh\n: "${SKILLBOX_CONFIG:='+shlex.quote(str(first))+'}"\nexport SKILLBOX_CONFIG\nexec '+shlex.quote(runtime)+' '+shlex.quote(str(install/'skillbox.mjs'))+' "$@"\n'
 write(root/'.local/bin/skillbox',wrapper,0o755)
+if str(root/'.local/bin') not in os.environ.get('PATH','').split(os.pathsep):
+    print('Warning: ~/.local/bin is not on PATH; add it to run the skillbox command')
 print('Installed Skills Library bootstrap and MCP connections; existing native skills retained. Config backups: '+str(backup))

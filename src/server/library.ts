@@ -15,6 +15,7 @@ import type {
   SkillFile,
   SkillMetadata,
   GitHubSource,
+  GitLabSource,
 } from "../shared";
 import { expandBundles } from "./bundles";
 import { gatewayRecommender, gatewaySettings } from "./gateway";
@@ -453,7 +454,7 @@ export async function load(p: Principal, id: string, revision?: string) {
 export async function readFile(
   p: Principal,
   id: string,
-  revision: string,
+  revision: string | undefined,
   path: string,
 ) {
   id = await resolveReferenceId(id);
@@ -497,7 +498,7 @@ export async function publish(
   importReferenceId?: string,
   options: {
     archive?: boolean;
-    source?: GitHubSource;
+    source?: GitHubSource | GitLabSource;
     database?: Pick<typeof db, "transaction">;
   } = {},
 ) {

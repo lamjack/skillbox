@@ -7,7 +7,7 @@ import {
   boolean,
   index,
 } from "drizzle-orm/pg-core";
-import type { SkillFile, SkillMetadata, GitHubSource } from "../shared";
+import type { SkillFile, SkillMetadata, GitHubSource, GitLabSource } from "../shared";
 export const skills = pgTable("skills", {
   referenceId: text("reference_id")
     .notNull()
@@ -42,7 +42,7 @@ export const revisions = pgTable(
       .references(() => skills.id),
     metadata: jsonb("metadata").$type<SkillMetadata>().notNull(),
     files: jsonb("files").$type<SkillFile[]>().notNull(),
-    source: jsonb("source").$type<GitHubSource>(),
+    source: jsonb("source").$type<GitHubSource | GitLabSource>(),
     checksum: text("checksum").notNull(),
     message: text("message").notNull(),
     author: text("author").notNull(),

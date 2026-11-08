@@ -33,6 +33,10 @@ The CLI refuses non-local HTTP by default. If you deliberately use a trusted LAN
 
 The server publishes `GET /cli/checksums.json` with the SHA-256 digests of `/cli/skillbox.mjs`, `/cli/package.mjs`, and `/bootstrap/SKILL.md`. The client installer downloads these files, verifies each digest before writing anything, and aborts on any mismatch. For out-of-band pinning, pass `--expected-checksums <path>` with a checksums file obtained through a channel you trust instead of trusting the same server to vouch for its own downloads.
 
+## Optional self-hosted GitLab import
+
+Set `SKILLBOX_GITLAB_HOST` in `.env` to the bare hostname of your GitLab instance (optional `:port`; https only — for example `gitlab.example.com` or `gitlab.example.com:8443`). Owners then get a GitLab source on the import page and a **GitLab import** section in Settings for a personal or project access token with `read_api` and `read_repository` scopes; the token is stored encrypted and is never returned by the API. Unset the variable to disable the feature entirely. For a private CA, mount the PEM into the container read-only and set `NODE_EXTRA_CA_CERTS` to its path.
+
 ## Optional automatic HTTPS
 
 Point a public DNS name at your host and allow incoming ports 80/443. Add `SKILLBOX_DOMAIN=skills.example.com` using **your own** domain to `.env`, then:

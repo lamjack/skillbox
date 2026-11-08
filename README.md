@@ -326,7 +326,11 @@ Base MCP tools: `search_skills`, `recommend_skills`, `load_skill`, `read_skill_f
 
 Fetching validates every path, file hash, size, executable flag and package checksum, then writes atomically. It never runs code or installs dependencies. Revoking a key blocks future access but cannot retract already downloaded files. Bundles expand grants into deduplicated current leaf skills; references never grant access by themselves.
 
-`scripts/install-client.py` optionally configures Codex, Claude or Cursor from explicit per-client credentials on stdin, preserving existing settings and making local backups. Review any installer before running it.
+`scripts/install-client.py` optionally configures Codex, Claude, Cursor or Devin from explicit per-client credentials on stdin, preserving existing settings and making local backups; it also installs a `~/.local/bin/skillbox` CLI shim (add `~/.local/bin` to `PATH` to run it). Review any installer before running it.
+
+### Owner MCP (skillbox-admin)
+
+`cli/skillbox-admin.mjs` is a separate stdio MCP bridge for owner administration: skills/bundles, profiles, clients (including one-time client keys) and Git import/update checks over the admin REST API. It reads `SKILLBOX_ADMIN_CONFIG` (default `~/.config/skillbox/admin.json`) containing `{"url","token"}`; the file must be mode `0600` or the bridge refuses to start. Register it like the client bridge (e.g. `mcpServers` entry with `command: "node"`, args `[<repo>/cli/skillbox-admin.mjs, "mcp"]`, env `SKILLBOX_ADMIN_CONFIG`). It also exposes read-only analytics and status tools: `usage_summary` (aggregated reads/uses per active skill over a configurable window, from `GET /api/analytics/usage`), `list_events`, `list_proposals`/`get_proposal`/`review_proposal`, and `settings_status` (non-secret provider/GitLab/executor status). Mutating tools change the live library; the server's instructions tell agents to confirm intent first.
 
 ## Native MCP Skills
 
@@ -368,6 +372,10 @@ Preview downloads and validates the package without publishing. Review `SKILL.md
 Publication downloads the previewed commit again, validates Git blob hashes, and records repository, full commit SHA and directory on the immutable revision. Package bytes and executable flags are preserved; no scripts run. Owner-only endpoints: `POST /api/imports/github/preview` (`url`, optional repository-relative `path`) and `POST /api/imports/github/publish` (`url` from the preview, `id`, `expectedRevision`).
 
 Public repositories only: no GitHub token, private repositories, redirects, symlinks, submodules or Git LFS. Limits: 400 files, 2 MB per file, 8 MB per package, 30-second deadline, two active imports and 12 attempts/minute per instance. Truncated or oversized repository trees fail closed. Runtime artifacts and `.env*` files are excluded; recognizable embedded secrets block import. Secret detection is heuristic, not a guarantee that imported content is safe.
+
+### Import from GitLab (self-hosted)
+
+Set `SKILLBOX_GITLAB_HOST` to a bare hostname (optional `:port`, https only) to enable a GitLab option on the import page and **Settings → GitLab import** for a personal or project access token carrying `read_api` and `read_repository`, which is stored encrypted and never returned by the API. Project, `/-/tree/<ref>/<folder>` and `/-/blob/<ref>/…/SKILL.md` URLs work like their GitHub equivalents and share the same limits and validation. Unsetting the variable disables the feature. If the instance uses a private CA, give the container the CA through `NODE_EXTRA_CA_CERTS` (mount the PEM read-only and point the variable at it).
 
 ## Data portability
 
