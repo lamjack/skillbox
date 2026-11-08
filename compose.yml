@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: skillbox
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ${SKILLBOX_DATA_DIR:?Set SKILLBOX_DATA_DIR}/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U skillbox -d skillbox"]
       interval: 5s
@@ -40,7 +40,7 @@ services:
     ports:
       - "${SKILLBOX_BIND_ADDRESS:-127.0.0.1}:${SKILLBOX_PORT:-4791}:4791"
     volumes:
-      - app-data:/app/data
+      - ${SKILLBOX_DATA_DIR:?Set SKILLBOX_DATA_DIR}/app:/app/data
     read_only: true
     tmpfs:
       - /tmp
@@ -60,6 +60,3 @@ services:
       interval: 20s
       timeout: 5s
       retries: 3
-volumes:
-  postgres-data:
-  app-data:
