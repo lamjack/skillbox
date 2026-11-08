@@ -1031,7 +1031,7 @@ test("provider switching preserves separate encrypted keys, migrates Gateway set
     return Response.json({ model: "jev-latest", answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "score", score: 4, confidence: 0.95 }])), usage: direct ? { input_tokens: 100, output_tokens: 10 } : { inputTokens: 100, outputTokens: 10 } });
   }) as typeof fetch;
   try {
-    await connection`UPDATE workspace_settings SET value=${JSON.stringify(seal({ revision: "legacy-gateway-fixture", apiKey: "fixture-vercel-key" }))}::jsonb WHERE id='ai_gateway'`;
+    await connection`UPDATE workspace_settings SET value=${JSON.stringify(await seal({ revision: "legacy-gateway-fixture", apiKey: "fixture-vercel-key" }))}::jsonb WHERE id='ai_gateway'`;
     expect(await gatewaySettings()).toMatchObject({ provider: "vercel", configured: true, providers: { typesafe: { configured: false } } });
     expect((await recommendSkills(principal, { task: "Quality" })).provider).toBe("vercel");
     await configureGateway({ provider: "typesafe" });

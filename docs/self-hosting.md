@@ -31,6 +31,8 @@ The default bind is loopback. `0.0.0.0` exposes the app on all IPv4 interfaces; 
 
 The CLI refuses non-local HTTP by default. If you deliberately use a trusted LAN, opt in using `SKILLBOX_ALLOW_INSECURE_HTTP=1` or `"allowInsecureHttp": true` in that client's protected config. The optional client installer requires the same explicit JSON option for each HTTP client. This never disables HTTPS certificate validation.
 
+The server publishes `GET /cli/checksums.json` with the SHA-256 digests of `/cli/skillbox.mjs`, `/cli/package.mjs`, and `/bootstrap/SKILL.md`. The client installer downloads these files, verifies each digest before writing anything, and aborts on any mismatch. For out-of-band pinning, pass `--expected-checksums <path>` with a checksums file obtained through a channel you trust instead of trusting the same server to vouch for its own downloads.
+
 ## Optional automatic HTTPS
 
 Point a public DNS name at your host and allow incoming ports 80/443. Add `SKILLBOX_DOMAIN=skills.example.com` using **your own** domain to `.env`, then:

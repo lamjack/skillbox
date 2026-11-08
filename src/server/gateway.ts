@@ -53,9 +53,11 @@ export const gatewayInput = z
     (value) => value.provider !== undefined || value.apiKey !== undefined,
     "Choose a provider or update its key",
   );
-function decode(value?: unknown): Config {
+async function decode(value?: unknown): Promise<Config> {
   return value
-    ? configSchema.parse(open(value as Parameters<typeof open>[0]))
+    ? configSchema.parse(
+        await open(value as Parameters<typeof open>[0], "ai_gateway"),
+      )
     : {
         revision: "unconfigured",
         provider: "vercel",
@@ -96,13 +98,13 @@ export async function configureGateway(input: z.input<typeof gatewayInput>) {
     await tx`SELECT pg_advisory_xact_lock(hashtext('skillbox-provider-settings'))`;
     const [row] =
       await tx`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
-    const config = decode(row?.value);
+    const config = await decode(row?.value);
     // Legacy callers of /settings/ai-gateway omit provider; their keys remain Gateway-only.
     config.provider = update.provider ?? "vercel";
     if (update.apiKey !== undefined)
       config.keys[config.provider] = update.apiKey;
     config.revision = randomUUID();
-    await tx`INSERT INTO workspace_settings(id,value) VALUES ('ai_gateway',${JSON.stringify(seal(config))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+    await tx`INSERT INTO workspace_settings(id,value) VALUES ('ai_gateway',${JSON.stringify(await seal(config))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
     return status(config);
   });
   engine = undefined;

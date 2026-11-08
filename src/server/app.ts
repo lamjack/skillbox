@@ -5,6 +5,7 @@ import { appOrigin as origin, allowedOrigins } from "./config";
 import { parseSkillIcon } from "../skill-icons";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
+import { createHash } from "node:crypto";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -659,6 +660,23 @@ app.get("/cli/skillbox.mjs", async (c) => {
 app.get("/cli/package.mjs", async (c) => {
   c.header("Content-Type", "text/javascript");
   return c.body(await Bun.file("cli/package.mjs").text());
+});
+let cliChecksums: Promise<Record<string, string>> | undefined;
+app.get("/cli/checksums.json", async (c) => {
+  cliChecksums ??= (async () => {
+    const files: Record<string, string> = {};
+    for (const path of [
+      "cli/skillbox.mjs",
+      "cli/package.mjs",
+      "bootstrap/SKILL.md",
+    ])
+      files[path] = createHash("sha256")
+        .update(Buffer.from(await Bun.file(path).arrayBuffer()))
+        .digest("hex");
+    return files;
+  })();
+  c.header("Cache-Control", "no-store");
+  return c.json({ files: await cliChecksums, algorithm: "sha256" });
 });
 app.use("/assets/*", serveStatic({ root: "./dist" }));
 app.get("/favicon.svg", async (c) => {

@@ -22,10 +22,15 @@ type Config = {
 async function read(): Promise<Config> {
   const [row] =
     await connection`SELECT value FROM workspace_settings WHERE id='executor'`;
-  return row ? open(row.value) as Config : { endpoint: "" };
+  return row
+    ? ((await open(
+        row.value as Parameters<typeof open>[0],
+        "executor",
+      )) as Config)
+    : { endpoint: "" };
 }
 async function save(c: Config) {
-  await connection`INSERT INTO workspace_settings(id,value) VALUES ('executor',${JSON.stringify(seal(c))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+  await connection`INSERT INTO workspace_settings(id,value) VALUES ('executor',${JSON.stringify(await seal(c))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
 }
 let queue = Promise.resolve();
 function serial<T>(f: () => Promise<T>): Promise<T> {
