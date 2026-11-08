@@ -14,7 +14,7 @@ import * as library from "./library";
 import type { Principal } from "../shared";
 import { authenticate } from "./auth";
 import { recommendationInput } from "./recommendations";
-import { megabytes, readFileMaxBytes } from "./config";
+import { mcpResourceCatalogEnabled, megabytes, readFileMaxBytes } from "./config";
 const wrapped = (fn: (args: any) => Promise<unknown>) => async (args: any) => {
   try {
     return {
@@ -103,6 +103,7 @@ export function createMcp(
   };
   server.server.setRequestHandler("resources/list", ({ params }) =>
     resourceRequest(async () => {
+      if (!mcpResourceCatalogEnabled()) return { resources: [] };
       const page = await skillResources.manifestPage(
         await refreshPrincipal(),
         params?.cursor,
@@ -119,7 +120,17 @@ export function createMcp(
     }),
   );
   server.server.setRequestHandler("resources/templates/list", async () => ({
-    resourceTemplates: [],
+    resourceTemplates: mcpResourceCatalogEnabled()
+      ? []
+      : [
+          {
+            uriTemplate: "skill://skillbox/{reference}/{name}/{path}",
+            name: "skill",
+            description:
+              "A skill file by reference and path, as returned by load_skill. The catalog is not listed; discover skills through recommend_skills or search_skills.",
+            mimeType: "text/markdown",
+          },
+        ],
   }));
   server.server.setRequestHandler("resources/read", ({ params }) =>
     resourceRequest(async () =>

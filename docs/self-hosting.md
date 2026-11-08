@@ -108,6 +108,8 @@ On first start after upgrading, the app backfills every existing revision from t
 
 Rollback: restore the pre-upgrade `pg_dump` taken per the backup section and start the previous image. There is no in-place reverse migration, because the legacy column cannot hold revisions above the 255 MiB limit.
 
+`SKILLBOX_MCP_RESOURCE_CATALOG` (default `true`) controls whether MCP `resources/list` enumerates every authorized skill. Hosts that walk the resource list when listing tools (Devin does) receive the whole catalog on first use; set it to `false` to return an empty list plus a `skill://skillbox/{reference}/{name}/{path}` resource template so `resources/read` keeps working while discovery goes through `recommend_skills` and `search_skills`.
+
 `SKILLBOX_MCP_RESOURCE_MAX_BYTES` (default `8000000`) caps the file size served inline by MCP `resources/read`; larger files require fetching the skill on the execution host with `skillbox fetch`. `SKILLBOX_READ_FILE_MAX_BYTES` (default `160000`) is the same cap for the `read_skill_file` tool and `GET /api/skills/:id/file`.
 
 `skillbox fetch` downloads a package listing (`GET /api/skills/:id/package`) and then each file on its own (`GET /api/skills/:id/package/file`), verifying every digest against the listing checksum, so packages of any configured size are materialized one file at a time. The inline `GET /api/skills/:id/bundle` response is still served for older clients.
