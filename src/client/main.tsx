@@ -425,7 +425,10 @@ function useCheckUpdates() {
   };
   const updateSelected = async () => {
     if (!result) return;
-    const groups = new Map<string, { row: UpdateRow; items: { path: string; id: string }[] }>();
+    const groups = new Map<
+      string,
+      { row: UpdateRow; items: { path: string; id: string }[] }
+    >();
     for (const row of result.results)
       if (row.status === "outdated" && checked.includes(row.id)) {
         const key = `${row.type}|${row.host ?? ""}|${row.repository}`;
@@ -436,7 +439,12 @@ function useCheckUpdates() {
     setBusy(true);
     setError("");
     try {
-      const merged: { path: string; id: string; status: string; message?: string }[] = [];
+      const merged: {
+        path: string;
+        id: string;
+        status: string;
+        message?: string;
+      }[] = [];
       for (const { row, items } of groups.values()) {
         const url =
           row.type === "github"
@@ -517,10 +525,7 @@ function CheckUpdatesPanel({
           </button>
         )}
         {!!issues.length && (
-          <Button
-            disabled={busy || !checked.length}
-            onClick={updateSelected}
-          >
+          <Button disabled={busy || !checked.length} onClick={updateSelected}>
             Update selected ({checked.length})
           </Button>
         )}
@@ -959,6 +964,18 @@ function SkillPage() {
     setBufferEdited(false);
   };
   const PREVIEW_LIMIT = 2_000_000;
+  // Raw bytes of a package file, served same-origin so <img> can load them.
+  const fileUrl = (p: string) =>
+    `/api/skills/${encodeURIComponent(id)}/package/file?revision=${encodeURIComponent(loaded.revision)}&path=${encodeURIComponent(p)}`;
+  const IMAGE_PATH = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+  const resolveRelative = (href: string) => {
+    const base = path.split("/").slice(0, -1);
+    for (const part of href.split(/[#?]/)[0].split("/")) {
+      if (part === "..") base.pop();
+      else if (part && part !== ".") base.push(part);
+    }
+    return base.join("/");
+  };
   // Bytes come from the package endpoint (no usage event); text is cached on
   // the entry so each file downloads at most once per page load.
   const textFor = async (entry: PageFile): Promise<PageFile> => {
@@ -1204,7 +1221,10 @@ function SkillPage() {
                 )
                   return;
                 const next = await stash();
-                const f = { ...(await encodedFile(fileDraft.trim(), "")), text: "" };
+                const f = {
+                  ...(await encodedFile(fileDraft.trim(), "")),
+                  text: "",
+                };
                 setFiles([...next, f]);
                 setPath(f.path);
                 setText("");
@@ -1331,13 +1351,21 @@ function SkillPage() {
                 </div>
               ))}
             </div>
+          ) : binary && currentFile && IMAGE_PATH.test(currentFile.path) ? (
+            <article className="markdown-preview">
+              <img
+                src={fileUrl(currentFile.path)}
+                alt={currentFile.path}
+                style={{ maxWidth: "100%" }}
+              />
+            </article>
           ) : binary ? (
             <Empty>
               {currentFile && currentFile.size > PREVIEW_LIMIT
                 ? "Large asset"
                 : "Binary asset"}{" "}
-              · {currentFile?.size.toLocaleString()} bytes. Fetch the package
-              to use this file.
+              · {currentFile?.size.toLocaleString()} bytes. Fetch the package to
+              use this file.
             </Empty>
           ) : mode === "edit" ? (
             <textarea
@@ -1397,11 +1425,30 @@ function SkillPage() {
                         {children}
                       </a>
                     ),
-                  img: ({ alt }) => (
-                    <span className="tag">
-                      Image: {alt ?? "bundled asset"} — available in package
-                    </span>
-                  ),
+                  img: ({ src, alt }) => {
+                    const candidate =
+                      typeof src === "string" && !/^[a-z]+:/i.test(src)
+                        ? resolveRelative(src)
+                        : null;
+                    return candidate &&
+                      files.some((f) => f.path === candidate) ? (
+                      <img
+                        src={fileUrl(candidate)}
+                        alt={alt ?? candidate}
+                        style={{ maxWidth: "100%" }}
+                      />
+                    ) : typeof src === "string" && /^https?:/.test(src) ? (
+                      <img
+                        src={src}
+                        alt={alt ?? ""}
+                        style={{ maxWidth: "100%" }}
+                      />
+                    ) : (
+                      <span className="tag">
+                        Image: {alt ?? "bundled asset"} — available in package
+                      </span>
+                    );
+                  },
                 }}
               >
                 {text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "")}

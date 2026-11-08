@@ -503,7 +503,16 @@ app.get("/api/skills/:id/package/file", async (c) => {
   const [file] = await loadFiles(db, r.id, [path]);
   if (!file) throw new lib.Problem(404, "File not found");
   const bytes = Buffer.from(file.content, "base64");
-  c.header("Content-Type", "application/octet-stream");
+  // Raster images get a real type so the UI can render them inline; every
+  // other file stays octet-stream and is never sniffed.
+  const image = path.match(/\.(png|jpe?g|gif|webp|avif)$/i)?.[1].toLowerCase();
+  c.header(
+    "Content-Type",
+    image
+      ? `image/${image === "jpg" ? "jpeg" : image}`
+      : "application/octet-stream",
+  );
+  c.header("X-Content-Type-Options", "nosniff");
   c.header("Content-Length", String(bytes.length));
   c.header("X-Skillbox-Sha256", file.sha256);
   return c.body(bytes);
