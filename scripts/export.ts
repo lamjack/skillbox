@@ -9,7 +9,14 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { db, connection, migrate } from "../src/server/db";
 import { skills } from "../src/server/schema";
-import { ADMIN, revisionFor, safePath, validId } from "../src/server/library";
+import {
+  ADMIN,
+  listRevisionFiles,
+  revisionRow,
+  safePath,
+  validId,
+} from "../src/server/library";
+import { loadFiles } from "../src/server/revision-files";
 await migrate();
 const dest = resolve(process.env.SKILLBOX_EXPORT_DIR ?? "data/export");
 await mkdir(dest, { recursive: true, mode: 0o700 });
@@ -29,15 +36,17 @@ for (const section of sections)
   await mkdir(join(dest, section), { recursive: true });
 for (const s of await db.select().from(skills)) {
   validId(s.id);
-  const r = await revisionFor(ADMIN, s.id);
+  const r = await revisionRow(ADMIN, s.id);
   const section = s.archived ? "archive" : s.disabled ? "disabled" : "skills";
   const folder = join(dest, section, s.id);
   for (const other of sections.filter((x) => x !== section))
     await rm(join(dest, other, s.id), { recursive: true, force: true });
   await rm(folder, { recursive: true, force: true });
-  for (const f of r.files) {
-    safePath(f.path);
-    const path = join(folder, f.path);
+  // One file at a time: large skills never sit fully in memory.
+  for (const entry of await listRevisionFiles(r.id)) {
+    safePath(entry.path);
+    const [f] = await loadFiles(db, r.id, [entry.path]);
+    const path = join(folder, entry.path);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await writeFile(path, Buffer.from(f.content, "base64"), {
       mode: f.executable ? 0o700 : 0o600,

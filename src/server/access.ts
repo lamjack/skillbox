@@ -3,7 +3,13 @@ import { and, eq, sql, desc } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
 import { profiles, clients, proposals } from "./schema";
-import { loadProposalFiles, storeProposalFiles } from "./revision-files";
+import {
+  listFiles,
+  listProposalFiles,
+  loadFiles,
+  loadProposalFiles,
+  storeProposalFiles,
+} from "./revision-files";
 import { assertAdmin, createClient } from "./auth";
 import * as lib from "./library";
 import type { Principal, SkillFile } from "../shared";
@@ -85,16 +91,22 @@ export async function uniqueClient(name: string, profileId: string) {
 export async function propose(
   p: Principal,
   id: string,
-  files: SkillFile[],
+  input: lib.SkillFileInput[],
   expectedRevision: string,
   message: string,
 ) {
   if (!lib.permits(p, "propose"))
     throw new lib.Problem(403, "Proposal permission required");
-  const current = await lib.revisionFor(p, id);
+  const current = await lib.revisionRow(p, id);
   if (current.id !== expectedRevision)
     throw new lib.Problem(409, "Skill changed. Reload before proposing.");
-  lib.validateFiles(files);
+  const { files, verified } = await lib.resolveFileReferences(
+    p,
+    id,
+    expectedRevision,
+    input,
+  );
+  lib.validateFiles(files, verified);
   const metadata = lib.metadata(id, files);
   for (const key of [
     "kind",
@@ -151,15 +163,54 @@ export async function proposalDetail(p: Principal, id: string) {
     .where(eq(proposals.id, id));
   if (!proposal || (p.role !== "admin" && proposal.clientId !== p.id))
     throw new lib.Problem(404, "Proposal not found");
-  const base = await lib.revisionFor(
+  // Both sides are returned as listings; content is attached only for the
+  // paths that differ and are not binary assets, so reviewing a proposal on a
+  // large skill never materializes its unchanged or binary files.
+  const base = await lib.revisionRow(
     p,
     proposal.skillId,
     proposal.expectedRevision,
   );
+  const [baseList, nextList] = await Promise.all([
+    listFiles(db, base.id),
+    listProposalFiles(db, proposal.id),
+  ]);
+  const byPath = (rows: typeof baseList) =>
+    new Map(rows.map((f) => [f.path, f] as const));
+  const a = byPath(baseList),
+    b = byPath(nextList);
+  const changed = [...new Set([...a.keys(), ...b.keys()])].filter((path) => {
+    const x = a.get(path),
+      y = b.get(path);
+    return x?.sha256 !== y?.sha256 || x?.executable !== y?.executable;
+  });
+  const textual = changed.filter((path) => !lib.BINARY_EXTENSIONS.test(path));
+  const attach = (
+    rows: typeof baseList,
+    loaded: SkillFile[],
+  ): lib.SkillFileInput[] => {
+    const content = new Map(loaded.map((f) => [f.path, f.content] as const));
+    return rows.map((f) =>
+      content.has(f.path) ? { ...f, content: content.get(f.path)! } : f,
+    );
+  };
+  const [baseLoaded, nextLoaded] = await Promise.all([
+    loadFiles(
+      db,
+      base.id,
+      textual.filter((path) => a.has(path)),
+    ),
+    loadProposalFiles(
+      db,
+      proposal.id,
+      textual.filter((path) => b.has(path)),
+    ),
+  ]);
   return {
     ...proposal,
-    files: await loadProposalFiles(db, proposal.id),
-    baseFiles: base.files,
+    files: attach(nextList, nextLoaded),
+    baseFiles: attach(baseList, baseLoaded),
+    changedPaths: changed,
   };
 }
 export async function reviewProposal(
@@ -182,11 +233,13 @@ export async function reviewProposal(
         ? await lib.publish(
             { ...p, name: `${p.name} (proposal by ${proposal.clientName})` },
             proposal.skillId,
-            await loadProposalFiles(tx, proposal.id),
+            // The proposal's listing is republished by reference; its blobs
+            // are already stored, so approval never loads the skill's assets.
+            await listProposalFiles(tx, proposal.id),
             proposal.expectedRevision,
             proposal.message,
             undefined,
-            { database: tx },
+            { database: tx, referenceRevision: { proposal: proposal.id } },
           )
         : null;
     await tx

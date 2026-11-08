@@ -1,7 +1,11 @@
 import * as access from "./access";
 import * as executor from "./executor";
 import * as gateway from "./gateway";
-import { appOrigin as origin, allowedOrigins } from "./config";
+import {
+  appOrigin as origin,
+  allowedOrigins,
+  requestBodyMaxBytes,
+} from "./config";
 import { parseSkillIcon } from "../skill-icons";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
@@ -60,7 +64,7 @@ app.use("*", async (c, next) => {
   );
   await next();
 });
-app.use("*", bodyLimit({ maxSize: 12_000_000 }));
+app.use("*", bodyLimit({ maxSize: requestBodyMaxBytes() }));
 app.onError((e, c) => {
   if (e instanceof lib.Problem)
     return c.json({ error: e.message }, e.status as any);
@@ -468,6 +472,42 @@ app.get("/api/skills/:id/bundle", async (c) => {
     await out.write("]}");
   });
 });
+// Large packages are fetched as a listing plus one request per file so the
+// client never holds the whole package in memory; the listing carries the
+// same checksum as the bundle so the CLI can verify it before downloading.
+app.get("/api/skills/:id/package", async (c) => {
+  const r = await lib.revisionRow(
+    c.get("principal"),
+    c.req.param("id"),
+    c.req.query("revision"),
+  );
+  await lib.record(c.get("principal"), "bundle", r.skillId, { revision: r.id });
+  return c.json({
+    format: "skillbox/v1-listing",
+    id: r.skillId,
+    revision: r.id,
+    checksum: r.checksum,
+    files: await listFiles(db, r.id),
+  });
+});
+app.get("/api/skills/:id/package/file", async (c) => {
+  const { revision, path } = z
+    .object({ revision: z.string(), path: z.string() })
+    .parse(c.req.query());
+  const r = await lib.revisionRow(
+    c.get("principal"),
+    c.req.param("id"),
+    revision,
+  );
+  lib.safePath(path);
+  const [file] = await loadFiles(db, r.id, [path]);
+  if (!file) throw new lib.Problem(404, "File not found");
+  const bytes = Buffer.from(file.content, "base64");
+  c.header("Content-Type", "application/octet-stream");
+  c.header("Content-Length", String(bytes.length));
+  c.header("X-Skillbox-Sha256", file.sha256);
+  return c.body(bytes);
+});
 app.get("/api/skills/:id/history", async (c) =>
   c.json(await lib.history(c.get("principal"), c.req.param("id"))),
 );
@@ -507,7 +547,7 @@ app.put("/api/skills/:id", async (c) => {
   const body = z
     .object({
       expectedRevision: z.string().nullable(),
-      files: z.array(fileSchema).max(400),
+      files: z.array(fileSchema),
       message: z.string().max(200).optional(),
     })
     .parse(await c.req.json());
@@ -525,20 +565,23 @@ app.post("/api/skills/:id/restore", async (c) => {
   const body = z
     .object({ revision: z.string(), expectedRevision: z.string() })
     .parse(await c.req.json());
-  const r = await lib.revisionFor(
+  // Restore by reference: the old revision's listing is republished and the
+  // blobs are shared, so no file bytes travel through the server.
+  const r = await lib.revisionRow(
     c.get("principal"),
     c.req.param("id"),
     body.revision,
   );
+  const listing = await lib.listRevisionFiles(r.id);
   return c.json(
     await lib.publish(
       c.get("principal"),
       r.skillId,
-      r.files,
+      listing,
       body.expectedRevision,
       "Restore " + r.id.slice(0, 8),
       undefined,
-      { source: r.source ?? undefined },
+      { source: r.source ?? undefined, referenceRevision: r.id },
     ),
   );
 });
@@ -661,7 +704,7 @@ app.patch("/api/clients/:id", async (c) => {
 app.post("/api/skills/:id/proposals", async (c) => {
   const b = z
     .object({
-      files: z.array(fileSchema).max(400),
+      files: z.array(fileSchema),
       expectedRevision: z.string(),
       message: z.string().trim().min(1).max(200),
     })

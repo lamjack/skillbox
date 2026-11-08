@@ -108,7 +108,11 @@ On first start after upgrading, the app backfills every existing revision from t
 
 Rollback: restore the pre-upgrade `pg_dump` taken per the backup section and start the previous image. There is no in-place reverse migration, because the legacy column cannot hold revisions above the 255 MiB limit.
 
-`SKILLBOX_MCP_RESOURCE_MAX_BYTES` (default `8000000`) caps the file size served inline by MCP `resources/read`; larger files require fetching the skill on the execution host with `skillbox fetch`.
+`SKILLBOX_MCP_RESOURCE_MAX_BYTES` (default `8000000`) caps the file size served inline by MCP `resources/read`; larger files require fetching the skill on the execution host with `skillbox fetch`. `SKILLBOX_READ_FILE_MAX_BYTES` (default `160000`) is the same cap for the `read_skill_file` tool and `GET /api/skills/:id/file`.
+
+`skillbox fetch` downloads a package listing (`GET /api/skills/:id/package`) and then each file on its own (`GET /api/skills/:id/package/file`), verifying every digest against the listing checksum, so packages of any configured size are materialized one file at a time. The inline `GET /api/skills/:id/bundle` response is still served for older clients.
+
+Publishing a revision (web editor, `upsert_skill`, `PUT /api/skills/:id`) may send unchanged files as references (`path`, `sha256`, `size`, `executable` without `content`); the server resolves them from `expectedRevision`. `SKILLBOX_REQUEST_BODY_MAX_BYTES` caps request bodies and defaults to the larger of 12 MB and roughly 1.4 × `SKILLBOX_IMPORT_MAX_BYTES`, enough for a full-content publish of the configured skill size.
 
 ## Diagnose without dumping configuration
 

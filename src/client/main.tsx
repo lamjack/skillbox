@@ -920,8 +920,16 @@ function LibraryPage() {
 function SkillPage() {
   const { id } = skillRoute.useParams();
   const sourceRef = useRef<HTMLTextAreaElement>(null);
+  // Only edited or new files carry content; the rest are references the
+  // server resolves from the expected revision, so large packages never
+  // round-trip through the browser.
+  type PageFile = Omit<SkillFile, "content"> & {
+    content?: string;
+    text?: string;
+    binary?: boolean;
+  };
   const [loaded, setLoaded] = useState<any>(null),
-    [files, setFiles] = useState<SkillFile[]>([]),
+    [files, setFiles] = useState<PageFile[]>([]),
     [path, setPath] = useState("SKILL.md"),
     [text, setText] = useState(""),
     [mode, setMode] = useState<"read" | "edit" | "history">("read"),
@@ -934,20 +942,39 @@ function SkillPage() {
     [bufferEdited, setBufferEdited] = useState(false);
   const auth = useContext(Auth);
   const refresh = async () => {
-    const l = await api("/skills/" + id);
-    const [b, h] = await Promise.all([
-      api("/skills/" + id + "/bundle?revision=" + l.revision),
+    const [l, h] = await Promise.all([
+      api("/skills/" + id),
       api("/skills/" + id + "/history"),
     ]);
     setLoaded(l);
-    setFiles(b.files);
+    setFiles(
+      l.files.map((f: PageFile) =>
+        f.path === "SKILL.md" ? { ...f, text: l.instructions } : f,
+      ),
+    );
     setHistory(h);
     setPath("SKILL.md");
-    setText(
-      decoded(b.files.find((f: SkillFile) => f.path === "SKILL.md").content),
-    );
+    setText(l.instructions);
     setDirty(false);
     setBufferEdited(false);
+  };
+  const PREVIEW_LIMIT = 2_000_000;
+  // Bytes come from the package endpoint (no usage event); text is cached on
+  // the entry so each file downloads at most once per page load.
+  const textFor = async (entry: PageFile): Promise<PageFile> => {
+    if (entry.text !== undefined || entry.binary) return entry;
+    if (entry.content !== undefined)
+      return { ...entry, text: decoded(entry.content) };
+    if (entry.size > PREVIEW_LIMIT) return { ...entry, binary: true };
+    const r = await fetch(
+      `/api/skills/${encodeURIComponent(id)}/package/file?revision=${encodeURIComponent(loaded.revision)}&path=${encodeURIComponent(entry.path)}`,
+      { credentials: "same-origin" },
+    );
+    if (!r.ok) throw new Error("Could not load " + entry.path);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    return bytes.includes(0)
+      ? { ...entry, binary: true }
+      : { ...entry, text: new TextDecoder().decode(bytes) };
   };
   useEffect(() => {
     setLoaded(null);
@@ -958,24 +985,34 @@ function SkillPage() {
     shouldBlockFn: () => dirty && !window.confirm("Discard unsaved changes?"),
     enableBeforeUnload: dirty,
   });
-  const stash = async () => {
+  const stash = async (): Promise<PageFile[]> => {
     if (!bufferEdited) return [...files];
     const existing = files.find((f) => f.path === path);
     return files
-      .map((f) => (f.path === path ? null : f))
-      .filter(Boolean)
-      .concat(
-        await encodedFile(path, text, existing?.executable),
-      ) as SkillFile[];
+      .filter((f) => f.path !== path)
+      .concat({
+        ...(await encodedFile(path, text, existing?.executable)),
+        text,
+      });
   };
   const choose = async (p: string) => {
-    const next = await stash();
+    let next = await stash();
+    try {
+      const entry = await textFor(next.find((f) => f.path === p)!);
+      next = next.map((f) => (f.path === p ? entry : f));
+      setText(entry.text ?? "");
+    } catch (e) {
+      setError((e as Error).message);
+      return;
+    }
     setFiles(next);
     setPath(p);
-    setText(decoded(next.find((f) => f.path === p)!.content));
     setBufferEdited(false);
     setSaved(false);
   };
+  // Unchanged files travel as path/sha256/size/executable references.
+  const payload = (next: PageFile[]) =>
+    next.map(({ text: _t, binary: _b, ...f }) => f);
   const save = async () => {
     setBusy(true);
     setError("");
@@ -984,7 +1021,7 @@ function SkillPage() {
       await api("/skills/" + id, {
         method: "PUT",
         body: JSON.stringify({
-          files: next,
+          files: payload(next),
           expectedRevision: loaded.revision,
           message: "Update from workspace",
         }),
@@ -1024,7 +1061,7 @@ function SkillPage() {
       </main>
     );
   const currentFile = files.find((f) => f.path === path);
-  const binary = currentFile ? atob(currentFile.content).includes("\0") : false;
+  const binary = currentFile?.binary ?? false;
   return (
     <main
       className={`detail-page ${loaded.metadata.disabled ? "is-disabled-detail" : ""}`}
@@ -1167,7 +1204,7 @@ function SkillPage() {
                 )
                   return;
                 const next = await stash();
-                const f = await encodedFile(fileDraft.trim(), "");
+                const f = { ...(await encodedFile(fileDraft.trim(), "")), text: "" };
                 setFiles([...next, f]);
                 setPath(f.path);
                 setText("");
@@ -1296,8 +1333,11 @@ function SkillPage() {
             </div>
           ) : binary ? (
             <Empty>
-              Binary asset · {currentFile?.size.toLocaleString()} bytes. Fetch
-              the package to use this file.
+              {currentFile && currentFile.size > PREVIEW_LIMIT
+                ? "Large asset"
+                : "Binary asset"}{" "}
+              · {currentFile?.size.toLocaleString()} bytes. Fetch the package
+              to use this file.
             </Empty>
           ) : mode === "edit" ? (
             <textarea

@@ -14,6 +14,7 @@ import * as library from "./library";
 import type { Principal } from "../shared";
 import { authenticate } from "./auth";
 import { recommendationInput } from "./recommendations";
+import { megabytes, readFileMaxBytes } from "./config";
 const wrapped = (fn: (args: any) => Promise<unknown>) => async (args: any) => {
   try {
     return {
@@ -36,9 +37,12 @@ const wrapped = (fn: (args: any) => Promise<unknown>) => async (args: any) => {
     };
   }
 };
+// Content may be omitted for a file that is unchanged from expectedRevision;
+// the server resolves it by path and SHA-256 from that revision. Size limits
+// are enforced by library.validateFiles against the configured import limits.
 export const fileSchema = z.object({
   path: z.string().max(240),
-  content: z.string().max(3_000_000),
+  content: z.string().optional(),
   sha256: z.string().length(64),
   size: z.number().int().nonnegative(),
   executable: z.boolean(),
@@ -234,8 +238,7 @@ export function createMcp(
   server.registerTool(
     "read_skill_file",
     {
-      description:
-        "Read a specific reference or script from a skill revision; revision defaults to the skill's current revision. Text files only, up to 160 KB. For binary or larger files use skillbox fetch on the machine that needs them.",
+      description: `Read a specific reference or script from a skill revision; revision defaults to the skill's current revision. Text files only, up to ${megabytes(readFileMaxBytes())}. For binary or larger files use skillbox fetch on the machine that needs them.`,
       inputSchema: z.object({
         id: z.string(),
         revision: z.string().optional(),
@@ -268,7 +271,7 @@ export function createMcp(
     },
     wrapped(async ({ id, revision, outcome, context }) => {
       id = await library.resolveReferenceId(id);
-      await library.revisionFor(p, id, revision);
+      await library.revisionRow(p, id, revision);
       await library.record(p, "reported_use", id, {
         ...context,
         revision,
@@ -282,11 +285,11 @@ export function createMcp(
       "upsert_skill",
       {
         description:
-          "Publish a complete skill revision. Writer access only. Supply all files (base64 plus SHA-256), SKILL.md and the last loaded expectedRevision. Null expectedRevision creates a new skill. Omitting a file removes it from the new revision; old revisions are preserved.",
+          "Publish a complete skill revision. Writer access only. Supply all files (base64 plus SHA-256), SKILL.md and the last loaded expectedRevision. Null expectedRevision creates a new skill. Omitting a file removes it from the new revision; old revisions are preserved. A file unchanged from expectedRevision may omit content and carry only path, sha256, size and executable.",
         inputSchema: z.object({
           id: z.string(),
           expectedRevision: z.string().nullable(),
-          files: z.array(fileSchema).max(400),
+          files: z.array(fileSchema),
           message: z.string().max(200).optional(),
         }),
         annotations: {
@@ -304,10 +307,10 @@ export function createMcp(
       "propose_skill_update",
       {
         description:
-          "Submit a complete skill revision for owner review without changing the live skill. Preserve every file; supply the loaded expectedRevision and explain the change.",
+          "Submit a complete skill revision for owner review without changing the live skill. Preserve every file; supply the loaded expectedRevision and explain the change. Unchanged files may omit content and carry only path, sha256, size and executable.",
         inputSchema: z.object({
           id: z.string(),
-          files: z.array(fileSchema).max(400),
+          files: z.array(fileSchema),
           expectedRevision: z.string(),
           message: z.string().min(1).max(200),
         }),

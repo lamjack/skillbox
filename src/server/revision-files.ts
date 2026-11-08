@@ -1,10 +1,42 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import type { db } from "./db";
 import { blobs, proposalFiles, revisionFiles } from "./schema";
 import type { SkillFile } from "../shared";
 
+// Git blob object ID (`blob <size>\0<bytes>`), matching remote tree entries.
+export function gitBlobSha1(bytes: Buffer) {
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+}
+// Per-revision listing joined with each blob's Git object ID; update checks
+// compare this against the remote tree without reading any content.
+export const listGitShas = (tx: Tx, revisionId: string) =>
+  tx
+    .select({ path: revisionFiles.path, gitSha1: blobs.gitSha1 })
+    .from(revisionFiles)
+    .innerJoin(blobs, eq(blobs.sha256, revisionFiles.sha256))
+    .where(eq(revisionFiles.revisionId, revisionId));
+// Fills git_sha1 for blobs written before the column existed, one bounded
+// batch per call; returns the number of rows updated.
+export async function backfillGitShas(tx: Tx, limit = 20) {
+  const rows = await tx
+    .select({ sha256: blobs.sha256, content: blobs.content })
+    .from(blobs)
+    .where(isNull(blobs.gitSha1))
+    .limit(limit);
+  for (const row of rows)
+    await tx
+      .update(blobs)
+      .set({ gitSha1: gitBlobSha1(row.content) })
+      .where(eq(blobs.sha256, row.sha256));
+  return rows.length;
+}
+
 // Accepts either the database handle or a transaction.
-type Tx = Pick<typeof db, "select" | "insert" | "execute">;
+type Tx = Pick<typeof db, "select" | "insert" | "update" | "execute">;
 
 // Revisions and proposals keep their file listings in sibling tables that
 // share the content-addressed blobs table.
@@ -69,8 +101,13 @@ export const listFiles = (tx: Tx, revisionId: string) =>
   listOwned(tx, "revision", revisionId);
 export const loadFiles = (tx: Tx, revisionId: string, paths?: string[]) =>
   loadOwned(tx, "revision", revisionId, paths);
-export const loadProposalFiles = (tx: Tx, proposalId: string) =>
-  loadOwned(tx, "proposal", proposalId);
+export const loadProposalFiles = (
+  tx: Tx,
+  proposalId: string,
+  paths?: string[],
+) => loadOwned(tx, "proposal", proposalId, paths);
+export const listProposalFiles = (tx: Tx, proposalId: string) =>
+  listOwned(tx, "proposal", proposalId);
 
 const MAX_FILES_PER_STATEMENT = 50;
 const MAX_BYTES_PER_STATEMENT = 32 * 1024 * 1024;
@@ -106,16 +143,36 @@ async function storeOwned(
     chunk.push(file);
   }
   for (const chunk of chunks) {
-    await tx
-      .insert(blobs)
-      .values(
-        chunk.map((f) => ({
-          sha256: f.sha256,
-          size: f.size,
-          content: Buffer.from(f.content, "base64"),
-        })),
-      )
-      .onConflictDoNothing({ target: blobs.sha256 });
+    // Content-addressed: bytes already stored are never sent again.
+    const present = new Set(
+      (
+        await tx
+          .select({ sha256: blobs.sha256 })
+          .from(blobs)
+          .where(
+            inArray(
+              blobs.sha256,
+              chunk.map((f) => f.sha256),
+            ),
+          )
+      ).map((row) => row.sha256),
+    );
+    const fresh = chunk.filter((f) => !present.has(f.sha256));
+    if (fresh.length)
+      await tx
+        .insert(blobs)
+        .values(
+          fresh.map((f) => {
+            const content = Buffer.from(f.content, "base64");
+            return {
+              sha256: f.sha256,
+              size: f.size,
+              content,
+              gitSha1: gitBlobSha1(content),
+            };
+          }),
+        )
+        .onConflictDoNothing({ target: blobs.sha256 });
     const { table, key } = owners[owner];
     await tx
       .insert(table)

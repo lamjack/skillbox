@@ -96,6 +96,19 @@ export function mcpResourceMaxBytes(): number {
   return envPositiveInt("SKILLBOX_MCP_RESOURCE_MAX_BYTES", 8_000_000);
 }
 
+export function readFileMaxBytes(): number {
+  return envPositiveInt("SKILLBOX_READ_FILE_MAX_BYTES", 160_000);
+}
+
+// Publishing sends base64 (4/3 overhead) plus JSON framing; the body limit
+// follows the configured skill size unless set explicitly.
+export function requestBodyMaxBytes(): number {
+  return envPositiveInt(
+    "SKILLBOX_REQUEST_BODY_MAX_BYTES",
+    Math.max(12_000_000, Math.ceil(importMaxBytes() * 1.4) + 1_000_000),
+  );
+}
+
 export function megabytes(bytes: number): string {
   const value = bytes / 1_000_000;
   return `${Number.isInteger(value) ? value : value.toFixed(1)} MB`;

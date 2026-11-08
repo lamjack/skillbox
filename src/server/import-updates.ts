@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db } from "./db";
-import { loadFiles } from "./revision-files";
+import { listGitShas } from "./revision-files";
 import { revisions, skills } from "./schema";
 import { claimImport } from "./import-limit";
 import { githubJson, githubRepoUnder } from "./github-import";
@@ -12,13 +11,11 @@ import { excludedImportPath } from "../skill-import-safety";
 import { Problem } from "./library";
 import type { GitHubSource, GitLabSource } from "../shared";
 
-function blobSha(bytes: Buffer) {
-  return createHash("sha1")
-    .update(`blob ${bytes.length}\0`)
-    .update(bytes)
-    .digest("hex");
-}
-async function githubHead(repo: string, ref: string | undefined, signal: AbortSignal) {
+async function githubHead(
+  repo: string,
+  ref: string | undefined,
+  signal: AbortSignal,
+) {
   if (!ref) {
     const repository = await githubJson(`/repos/${repo}`, signal);
     if (typeof repository.default_branch !== "string")
@@ -95,7 +92,7 @@ async function gitlabHead(
   return { commit: commit.id as string, entries };
 }
 function compareSkill(
-  files: { path: string; content: string }[],
+  files: { path: string; gitSha1: string | null }[],
   dir: string,
   entries: { path: string; id: string; type?: string }[],
 ): { status: "current" | "outdated" | "missing"; message?: string } {
@@ -112,12 +109,7 @@ function compareSkill(
     treeFiles.set(relative, entry.id);
   }
   if (!dirSeen) return { status: "missing" };
-  const stored = new Map(
-    files.map((f) => [
-      f.path,
-      blobSha(Buffer.from(f.content, "base64")),
-    ]),
-  );
+  const stored = new Map(files.map((f) => [f.path, f.gitSha1]));
   const changed: string[] = [],
     missing: string[] = [],
     extra: string[] = [];
@@ -126,8 +118,7 @@ function compareSkill(
     if (head === undefined) missing.push(path);
     else if (head !== sha) changed.push(path);
   }
-  for (const path of treeFiles.keys())
-    if (!stored.has(path)) extra.push(path);
+  for (const path of treeFiles.keys()) if (!stored.has(path)) extra.push(path);
   if (!changed.length && !missing.length && !extra.length)
     return { status: "current" };
   const list = (paths: string[]) =>
@@ -256,7 +247,7 @@ export async function checkImportUpdates() {
       for (const row of group.rows) {
         const source = row.source as GitHubSource | GitLabSource;
         const compared = compareSkill(
-          await loadFiles(db, row.revisionId),
+          await listGitShas(db, row.revisionId),
           source.path,
           head.entries,
         );

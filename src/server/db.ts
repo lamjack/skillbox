@@ -1,8 +1,14 @@
-import { packageMetrics } from "../package-metrics";
+import { BINARY_EXTENSIONS, packageMetrics } from "../package-metrics";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "./schema";
-import { loadFiles, storeFiles, storeProposalFiles } from "./revision-files";
+import {
+  backfillGitShas,
+  listFiles,
+  loadFiles,
+  storeFiles,
+  storeProposalFiles,
+} from "./revision-files";
 export const connection = postgres(
   process.env.DATABASE_URL ?? "postgres://localhost/skillbox",
   { max: 8, onnotice: () => {} },
@@ -32,6 +38,9 @@ export async function migrate() {
     }
     await connection`ALTER TABLE revisions DROP COLUMN files`;
   }
+  await connection`ALTER TABLE blobs ADD COLUMN IF NOT EXISTS git_sha1 text`;
+  // Bounded batches: a batch reads at most 20 blobs into memory at once.
+  while (await backfillGitShas(db)) {}
   await connection`CREATE INDEX IF NOT EXISTS skills_search_idx ON skills USING gin(to_tsvector('english',search_text))`;
   await connection`CREATE TABLE IF NOT EXISTS clients (id text PRIMARY KEY,name text NOT NULL,token_hash text NOT NULL UNIQUE,role text NOT NULL DEFAULT 'reader',all_skills boolean NOT NULL DEFAULT false,skill_ids jsonb NOT NULL DEFAULT '[]',active boolean NOT NULL DEFAULT true,created_at timestamptz NOT NULL DEFAULT now())`;
   await connection`CREATE TABLE IF NOT EXISTS profiles (id text PRIMARY KEY,name text NOT NULL,all_skills boolean NOT NULL DEFAULT false,skill_ids jsonb NOT NULL DEFAULT '[]',permissions jsonb NOT NULL,version text NOT NULL DEFAULT gen_random_uuid()::text)`;
@@ -87,8 +96,25 @@ export async function migrate() {
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS package_metrics jsonb`;
   const unmeasured =
     await connection`SELECT s.id,s.revision FROM skills s JOIN revisions r ON r.id=s.revision WHERE s.package_metrics IS NULL`;
-  for (const row of unmeasured)
-    await connection`UPDATE skills SET package_metrics=${JSON.stringify(packageMetrics(await loadFiles(db, row.revision)))}::jsonb WHERE id=${row.id} AND revision=${row.revision}`;
+  // Binary assets only contribute their size, so only text files are loaded.
+  for (const row of unmeasured) {
+    const listing = await listFiles(db, row.revision);
+    const text = new Map(
+      (
+        await loadFiles(
+          db,
+          row.revision,
+          listing
+            .filter((f) => !BINARY_EXTENSIONS.test(f.path))
+            .map((f) => f.path),
+        )
+      ).map((f) => [f.path, f.content] as const),
+    );
+    const metrics = packageMetrics(
+      listing.map((f) => ({ ...f, content: text.get(f.path) ?? "" })),
+    );
+    await connection`UPDATE skills SET package_metrics=${JSON.stringify(metrics)}::jsonb WHERE id=${row.id} AND revision=${row.revision}`;
+  }
   await connection`ALTER TABLE skills ADD COLUMN IF NOT EXISTS reference_id text NOT NULL DEFAULT gen_random_uuid()::text`;
   await connection`CREATE UNIQUE INDEX IF NOT EXISTS skills_reference_id_idx ON skills(reference_id)`;
 }

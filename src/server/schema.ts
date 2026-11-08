@@ -64,6 +64,9 @@ export const blobs = pgTable("blobs", {
   sha256: text("sha256").primaryKey(),
   size: integer("size").notNull(),
   content: bytea("content").notNull(),
+  // Git blob object ID, so update checks compare against remote trees
+  // without reading content.
+  gitSha1: text("git_sha1"),
 });
 export const revisionFiles = pgTable(
   "revision_files",

@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { app } from "../src/server/app";
 import { migrate, db, connection } from "../src/server/db";
 import {
@@ -1469,6 +1469,153 @@ test("concurrent save conflict protects old and new revisions", async () => {
     firstRevision,
   );
 });
+test("package listing and per-file downloads let clients fetch without the inline bundle", async () => {
+  const id = `test-package-${randomUUID().slice(0, 8)}`;
+  graphIds.push(id);
+  const original = files(id);
+  const first = await publish(ADMIN, id, original, null);
+  const admin = { Authorization: "Bearer " + process.env.SKILLBOX_ADMIN_TOKEN };
+  const listing = await (
+    await app.request(`/api/skills/${id}/package`, { headers: admin })
+  ).json();
+  expect(listing).toMatchObject({
+    format: "skillbox/v1-listing",
+    id,
+    revision: first.revision,
+    checksum: first.checksum,
+  });
+  expect(listing.files.map((f: any) => f.path)).toEqual([
+    "SKILL.md",
+    "references/guide.md",
+  ]);
+  expect(listing.files.some((f: any) => "content" in f)).toBe(false);
+  const raw = await app.request(
+    `/api/skills/${id}/package/file?revision=${first.revision}&path=references/guide.md`,
+    { headers: admin },
+  );
+  expect(raw.status).toBe(200);
+  expect(raw.headers.get("content-type")).toBe("application/octet-stream");
+  expect(await raw.text()).toBe("Reference content");
+  expect(
+    (
+      await app.request(
+        `/api/skills/${id}/package/file?revision=${first.revision}&path=missing.md`,
+        { headers: admin },
+      )
+    ).status,
+  ).toBe(404);
+
+  // Unchanged files travel as sha256 references; only the edited file carries bytes.
+  const { content: _c, ...reference } = original[1]!;
+  const edited = makeFile(
+    "SKILL.md",
+    `---\nname: ${id}\ndescription: Quality workflow for a fixture\n---\n\nEdited.`,
+  );
+  const saved = await (
+    await app.request(`/api/skills/${id}`, {
+      method: "PUT",
+      headers: { ...admin, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedRevision: first.revision,
+        files: [edited, reference],
+      }),
+    })
+  ).json();
+  expect(saved.revision).toBeDefined();
+  const after = await revisionFor(ADMIN, id);
+  expect(after.files.find((f) => f.path === "references/guide.md")).toEqual(
+    original[1],
+  );
+  expect(
+    Buffer.from(
+      after.files.find((f) => f.path === "SKILL.md")!.content,
+      "base64",
+    ).toString(),
+  ).toContain("Edited.");
+
+  // A reference whose digest is not in the expected revision is rejected,
+  // and new skills must carry every file's bytes.
+  const tampered = await app.request(`/api/skills/${id}`, {
+    method: "PUT",
+    headers: { ...admin, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expectedRevision: saved.revision,
+      files: [edited, { ...reference, sha256: "0".repeat(64) }],
+    }),
+  });
+  expect(tampered.status).toBe(400);
+  await expect(
+    publish(
+      ADMIN,
+      `test-fresh-${randomUUID().slice(0, 8)}`,
+      [reference as any],
+      null,
+    ),
+  ).rejects.toThrow("every file's content");
+
+  // Binary references are verified by digest without loading their bytes,
+  // and restore republishes an old listing by reference.
+  const pdfBytes = Buffer.concat([
+    Buffer.from("%PDF-1.4\n"),
+    Buffer.from([0, 1, 2, 3, 255, 254]),
+  ]);
+  const pdf = {
+    path: "references/spec.pdf",
+    content: pdfBytes.toString("base64"),
+    size: pdfBytes.length,
+    sha256: createHash("sha256").update(pdfBytes).digest("hex"),
+    executable: false,
+  };
+  const withPdf = await publish(
+    ADMIN,
+    id,
+    [edited, reference, pdf],
+    saved.revision,
+  );
+  const { content: _p, ...pdfRef } = pdf;
+  const third = await publish(
+    ADMIN,
+    id,
+    [edited, reference, pdfRef as any],
+    withPdf.revision,
+  );
+  expect(
+    (await revisionFor(ADMIN, id, third.revision)).files.find(
+      (f) => f.path === pdf.path,
+    ),
+  ).toEqual(pdf);
+  const restored = await (
+    await app.request(`/api/skills/${id}/restore`, {
+      method: "POST",
+      headers: { ...admin, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        revision: first.revision,
+        expectedRevision: third.revision,
+      }),
+    })
+  ).json();
+  expect(restored.revision).toBeDefined();
+  expect((await revisionFor(ADMIN, id)).files).toEqual(original);
+
+  // Lifecycle edits republish by reference and keep the binary asset intact.
+  const current = await revisionFor(ADMIN, id);
+  const disabled = await setDisabled(ADMIN, id, true, current.id);
+  const afterDisable = await revisionFor(ADMIN, id, disabled.revision);
+  expect(afterDisable.metadata.disabled).toBe(true);
+  expect(
+    afterDisable.files.find((f) => f.path === "references/guide.md"),
+  ).toEqual(original[1]);
+  const pdfAgain = await publish(
+    ADMIN,
+    id,
+    [...afterDisable.files, pdf],
+    disabled.revision,
+  );
+  const archived = await archiveSkill(ADMIN, id, pdfAgain.revision);
+  const afterArchive = await revisionFor(ADMIN, id, archived.revision);
+  expect(afterArchive.files.find((f) => f.path === pdf.path)).toEqual(pdf);
+  expect(afterArchive.metadata.archived).toBe(true);
+});
 test("revoke immediately blocks an existing token", async () => {
   await db
     .update(clients)
@@ -1904,14 +2051,35 @@ test("separate create/update/delete permissions and proposals preserve revision 
     await expect(
       access.propose(p, ids[1], files(ids[1]), firstRevision, "No access"),
     ).rejects.toMatchObject({ status: 404 });
+    // A binary asset rides along: the detail view must list it without bytes,
+    // and approval must republish it by reference.
+    const pdfBytes = Buffer.from("%PDF-1.4\n\0\x01\xff proposal");
+    const pdf = {
+      path: "references/spec.pdf",
+      content: pdfBytes.toString("base64"),
+      size: pdfBytes.length,
+      sha256: createHash("sha256").update(pdfBytes).digest("hex"),
+      executable: false,
+    };
     const proposed = await access.propose(
       p,
       id,
-      files(id, "Proposed body"),
+      [...files(id, "Proposed body"), pdf],
       initial.revision,
       "Improve instructions",
     );
     expect((await revisionFor(ADMIN, id)).id).toBe(initial.revision);
+    const detail = await access.proposalDetail(ADMIN, proposed.id);
+    expect(detail.changedPaths.sort()).toEqual(["SKILL.md", pdf.path]);
+    const detailPdf = detail.files.find((f) => f.path === pdf.path)!;
+    expect(detailPdf.sha256).toBe(pdf.sha256);
+    expect(detailPdf.content).toBeUndefined();
+    expect(
+      detail.files.find((f) => f.path === "SKILL.md")!.content,
+    ).toBeDefined();
+    expect(
+      detail.baseFiles.find((f) => f.path === "references/guide.md")!.content,
+    ).toBeUndefined();
     await expect(
       access.reviewProposal(p, proposed.id, "approve"),
     ).rejects.toMatchObject({ status: 403 });
@@ -1919,7 +2087,11 @@ test("separate create/update/delete permissions and proposals preserve revision 
       access.proposalDetail({ ...p, id: "different-client" }, proposed.id),
     ).rejects.toMatchObject({ status: 404 });
     const approval = await access.reviewProposal(ADMIN, proposed.id, "approve");
-    expect((await revisionFor(ADMIN, id)).id).toBe(approval.revision!);
+    const approvedRevision = await revisionFor(ADMIN, id);
+    expect(approvedRevision.id).toBe(approval.revision!);
+    expect(approvedRevision.files.find((f) => f.path === pdf.path)).toEqual(
+      pdf,
+    );
     await expect(
       access.reviewProposal(ADMIN, proposed.id, "approve"),
     ).rejects.toMatchObject({ status: 409 });

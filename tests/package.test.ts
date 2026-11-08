@@ -1,6 +1,11 @@
 import { test, expect } from "bun:test";
-// @ts-expect-error CLI intentionally ships as dependency-free JavaScript.
-import { verifyBundle, materialize, hash } from "../cli/package.mjs";
+import {
+  verifyBundle,
+  materialize,
+  materializeWith,
+  hash,
+  // @ts-expect-error CLI intentionally ships as dependency-free JavaScript.
+} from "../cli/package.mjs";
 import { makeFile } from "../src/server/library";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,6 +46,34 @@ test("fetch materializes verified bytes without trusting a previous mutable copy
     expect(c).not.toBe(a);
     expect(isAbsolute(c)).toBe(true);
     expect(await readFile(join(c, "SKILL.md"), "utf8")).toBe("A workflow");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("listings materialize file by file and reject bytes that do not match the listing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillbox-"));
+  try {
+    const b = bundle();
+    const listing = {
+      ...b,
+      format: "skillbox/v1-listing",
+      files: b.files.map(({ content, ...f }) => f),
+    };
+    const bytes = new Map(
+      b.files.map((f) => [f.path, Buffer.from(f.content, "base64")]),
+    );
+    const dir = await materializeWith(listing, root, (f: any) =>
+      bytes.get(f.path),
+    );
+    expect(await readFile(join(dir, "SKILL.md"), "utf8")).toBe("A workflow");
+    await expect(
+      materializeWith(listing, root, () => Buffer.from("tampered")),
+    ).rejects.toThrow("integrity");
+    listing.files = listing.files.filter((f: any) => f.path !== "SKILL.md");
+    await expect(
+      materializeWith(listing, root, (f: any) => bytes.get(f.path)),
+    ).rejects.toThrow();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

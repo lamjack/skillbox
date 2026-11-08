@@ -10,7 +10,7 @@ import {
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { hash, materialize } from "./package.mjs";
+import { hash, materializeWith } from "./package.mjs";
 const configPath =
   process.env.SKILLBOX_CONFIG ??
   join(homedir(), ".config/skillbox/config.json");
@@ -71,12 +71,12 @@ function mcpRequestHeaders(message) {
   }
   return headers;
 }
-async function request(path, options = {}, preserveProtocolErrors = false) {
+async function send(path, options = {}) {
   if (!token) throw new Error("Set SKILLBOX_TOKEN or configure the client");
-  const r = await fetch(base + path, {
+  return fetch(base + path, {
     ...options,
     redirect: "error",
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(options.timeout ?? 30000),
     headers: {
       Authorization: "Bearer " + token,
       "X-Skillbox-Source": "cli",
@@ -89,6 +89,42 @@ async function request(path, options = {}, preserveProtocolErrors = false) {
       ...options.headers,
     },
   });
+}
+async function readBounded(r, limit) {
+  const declared = Number(r.headers.get("content-length") ?? 0);
+  if (declared > limit) throw new Error("Response too large");
+  const reader = r.body.getReader();
+  let n = 0,
+    chunks = [];
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > limit) {
+      await reader.cancel();
+      throw new Error("Response too large");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+async function failure(r) {
+  const d = await r.json().catch(() => ({}));
+  return new Error(
+    typeof d.error === "string" ? d.error : `Library HTTP ${r.status}`,
+  );
+}
+// Raw bytes of one package file; the size is bounded by the verified listing.
+async function requestBytes(path, expectedSize) {
+  const r = await send(path, {
+    headers: { Accept: "application/octet-stream" },
+    timeout: 300000,
+  });
+  if (!r.ok) throw await failure(r);
+  return readBounded(r, expectedSize);
+}
+async function request(path, options = {}, preserveProtocolErrors = false) {
+  const r = await send(path, options);
   if (!r.ok) {
     const d = await r.json().catch(() => ({}));
     // Modern MCP uses HTTP 400 for negotiation/envelope errors. Preserve the
@@ -105,22 +141,7 @@ async function request(path, options = {}, preserveProtocolErrors = false) {
     );
   }
   if (r.status === 202) return null;
-  const declared = Number(r.headers.get("content-length") ?? 0);
-  if (declared > 12_000_000) throw new Error("Response too large");
-  const reader = r.body.getReader();
-  let n = 0,
-    chunks = [];
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    n += value.length;
-    if (n > 12_000_000) {
-      await reader.cancel();
-      throw new Error("Response too large");
-    }
-    chunks.push(value);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return JSON.parse((await readBounded(r, 12_000_000)).toString("utf8"));
 }
 async function main() {
   const [command, arg] = process.argv.slice(2);
@@ -297,19 +318,32 @@ async function main() {
       )
     )
       id = (await request("/api/skill-references/" + uuid.toLowerCase())).id;
-    const b = await request(
-      "/api/skills/" +
-        encodeURIComponent(id) +
-        "/bundle" +
+    // The listing is small; each file is then downloaded and verified on its
+    // own, so packages of any configured size fit in memory one file at a time.
+    const skillPath = "/api/skills/" + encodeURIComponent(id);
+    const listing = await request(
+      skillPath +
+        "/package" +
         (revision ? "?revision=" + encodeURIComponent(revision) : ""),
     );
-    if (b.id !== id || (revision && b.revision !== revision))
+    if (listing.id !== id || (revision && listing.revision !== revision))
       throw new Error("Server returned a different package");
     const root = join(
       process.env.SKILLBOX_CACHE ?? join(homedir(), ".cache/skillbox"),
       hash(base + "\0" + token).slice(0, 24),
     );
-    console.log(await materialize(b, root));
+    console.log(
+      await materializeWith(listing, root, (f) =>
+        requestBytes(
+          skillPath +
+            "/package/file?revision=" +
+            encodeURIComponent(listing.revision) +
+            "&path=" +
+            encodeURIComponent(f.path),
+          f.size,
+        ),
+      ),
+    );
     return;
   }
   if (command === "publish") {
@@ -335,7 +369,7 @@ async function main() {
         if (s.isSymbolicLink()) throw new Error("Symlinks are not supported");
         if (s.isDirectory()) await walk(p, rel + "/");
         else if (s.isFile()) {
-          if (s.size > 2_000_000) throw new Error("File exceeds 2 MB");
+          // Size limits are the server's; it reports the configured values.
           const b = await readFile(p);
           files.push({
             path: rel,
@@ -352,6 +386,7 @@ async function main() {
       JSON.stringify(
         await request("/api/skills/" + encodeURIComponent(id), {
           method: "PUT",
+          timeout: 300000,
           body: JSON.stringify({
             expectedRevision: expected === "new" ? null : expected,
             files,

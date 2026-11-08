@@ -73,3 +73,8 @@ export function packageMetrics(files: SkillFile[]) {
   }
   return { characters, packageBytes, fileCount, entryCharacters };
 }
+
+// Assets that never contribute text to metadata, search or package metrics;
+// they are verified by digest and their bytes stay in the blob store.
+export const BINARY_EXTENSIONS =
+  /\.(pdf|png|jpe?g|gif|webp|avif|ico|bmp|tiff?|zip|gz|tgz|bz2|xz|7z|rar|jar|woff2?|ttf|otf|eot|mp[34]|m4[av]|mov|avi|mkv|webm|wav|ogg|flac|docx?|xlsx?|pptx?|bin|exe|dll|so|dylib|wasm|sqlite|db)$/i;

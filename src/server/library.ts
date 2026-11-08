@@ -10,7 +10,13 @@ import matter from "gray-matter";
 import { and, eq, desc, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { skills, revisions, events } from "./schema";
-import { listFiles, loadFiles, storeFiles } from "./revision-files";
+import {
+  listFiles,
+  listProposalFiles,
+  loadFiles,
+  loadProposalFiles,
+  storeFiles,
+} from "./revision-files";
 import type {
   Principal,
   SkillFile,
@@ -25,6 +31,7 @@ import {
   importMaxFileBytes,
   importMaxFiles,
   megabytes,
+  readFileMaxBytes,
 } from "./config";
 import {
   MAX_CANDIDATES,
@@ -66,7 +73,13 @@ export function safePath(path: string) {
     throw new Problem(400, "Invalid file path");
   return path;
 }
-export function validateFiles(files: SkillFile[]) {
+// verified paths were matched against a stored listing (path, sha256, size) by
+// resolveFileReferences; their bytes are already in the blob store and are not
+// re-checked, so binary references never need to be loaded at all.
+export function validateFiles(
+  files: SkillFile[],
+  verified = new Set<string>(),
+) {
   const maxFiles = importMaxFiles(),
     maxBytes = importMaxBytes(),
     maxFileBytes = importMaxFileBytes();
@@ -79,6 +92,17 @@ export function validateFiles(files: SkillFile[]) {
     const key = f.path.normalize("NFC").toLowerCase();
     if (seen.has(key)) throw new Problem(400, "Duplicate file path");
     seen.add(key);
+    if (typeof f.executable !== "boolean")
+      throw new Problem(400, "Invalid executable flag");
+    if (verified.has(f.path)) {
+      if (f.size > maxFileBytes)
+        throw new Problem(
+          400,
+          `Files are limited to ${megabytes(maxFileBytes)}`,
+        );
+      total += f.size;
+      continue;
+    }
     if (
       typeof f.content !== "string" ||
       f.content.length > maxFileBytes * 2 ||
@@ -95,8 +119,6 @@ export function validateFiles(files: SkillFile[]) {
     if (bytes.length > maxFileBytes)
       throw new Problem(400, `Files are limited to ${megabytes(maxFileBytes)}`);
     total += bytes.length;
-    if (typeof f.executable !== "boolean")
-      throw new Problem(400, "Invalid executable flag");
   }
   if (total > maxBytes)
     throw new Problem(400, `Skill is limited to ${megabytes(maxBytes)}`);
@@ -106,6 +128,105 @@ export function validateFiles(files: SkillFile[]) {
         throw new Problem(400, "File path conflicts with directory");
   if (!files.some((f) => f.path === "SKILL.md"))
     throw new Problem(400, "SKILL.md is required");
+}
+// A publish or proposal may reference unchanged files by path and SHA-256
+// instead of resending their bytes. Only files present in expectedRevision
+// with the same digest resolve; anything else is rejected before validation.
+export type SkillFileInput = Omit<SkillFile, "content"> & { content?: string };
+// Content-free listing of a revision, usable as sha256 references.
+export const listRevisionFiles = (
+  revisionId: string,
+): Promise<SkillFileInput[]> => listFiles(db, revisionId);
+// Revision whose listing carries content only for the given paths; the rest
+// republish as sha256 references, so lifecycle edits (disable, archive, icon,
+// integrations) never load a large skill's assets.
+async function revisionSparse(
+  p: Principal,
+  id: string,
+  revision: string | undefined,
+  paths: string[] = ["SKILL.md"],
+) {
+  const r = await revisionRow(p, id, revision);
+  const listing = await listFiles(db, r.id);
+  const wanted = paths.filter((x) => listing.some((f) => f.path === x));
+  const loaded = new Map(
+    (await loadFiles(db, r.id, wanted)).map(
+      (f) => [f.path, f.content] as const,
+    ),
+  );
+  const files: SkillFileInput[] = listing.map((f) =>
+    loaded.has(f.path) ? { ...f, content: loaded.get(f.path)! } : f,
+  );
+  return { ...r, files };
+}
+const contentOf = (f: SkillFileInput) => {
+  if (typeof f.content !== "string")
+    throw new Problem(500, `Content not loaded for ${f.path}`);
+  return f.content;
+};
+import { BINARY_EXTENSIONS } from "../package-metrics";
+export { BINARY_EXTENSIONS };
+export type ReferenceSource = string | { proposal: string };
+export async function resolveFileReferences(
+  p: Principal,
+  id: string,
+  expectedRevision: string | null,
+  files: SkillFileInput[],
+  source: ReferenceSource | null = expectedRevision,
+): Promise<{ files: SkillFile[]; verified: Set<string> }> {
+  if (!Array.isArray(files)) throw new Problem(400, "Expected a file list");
+  const referenced = files.filter((f) => typeof f.content !== "string");
+  const verified = new Set<string>();
+  if (!referenced.length) return { files: files as SkillFile[], verified };
+  if (source === null)
+    throw new Problem(400, "New skills must include every file's content");
+  for (const f of referenced) safePath(f.path);
+  // References resolve against a revision (default) or, when approving a
+  // proposal, against the proposal's own stored listing.
+  const [list, load, label] =
+    typeof source === "string"
+      ? await (async () => {
+          const r = await revisionRow(p, id, source);
+          return [
+            () => listFiles(db, r.id),
+            (paths: string[]) => loadFiles(db, r.id, paths),
+            `revision ${source.slice(0, 8)}`,
+          ] as const;
+        })()
+      : ([
+          () => listProposalFiles(db, source.proposal),
+          (paths: string[]) => loadProposalFiles(db, source.proposal, paths),
+          `proposal ${source.proposal.slice(0, 8)}`,
+        ] as const);
+  const stored = new Map((await list()).map((f) => [f.path, f] as const));
+  for (const f of referenced) {
+    const base = stored.get(f.path);
+    if (!base || base.sha256 !== f.sha256 || base.size !== f.size)
+      throw new Problem(400, `Referenced file is not in ${label}: ${f.path}`);
+    verified.add(f.path);
+  }
+  // Icon images are the one binary whose bytes metadata needs (resolveIcon
+  // inlines them as a data URL).
+  const wanted = referenced
+    .filter(
+      (f) =>
+        !BINARY_EXTENSIONS.test(f.path) ||
+        /^assets\/skillbox-icon\.(png|webp|jpeg)$/.test(f.path),
+    )
+    .map((f) => f.path);
+  const loaded = new Map(
+    (wanted.length ? await load(wanted) : []).map(
+      (f) => [f.path, f.content] as const,
+    ),
+  );
+  return {
+    verified,
+    files: files.map((f) =>
+      typeof f.content === "string"
+        ? (f as SkillFile)
+        : { ...f, content: loaded.get(f.path) ?? "" },
+    ),
+  };
 }
 export function metadata(id: string, files: SkillFile[]): SkillMetadata {
   const text = Buffer.from(
@@ -473,8 +594,11 @@ export async function readFile(
   safePath(path);
   const entry = (await listFiles(db, r.id)).find((f) => f.path === path);
   if (!entry) throw new Problem(404, "File not found");
-  if (entry.size > 160_000)
-    throw new Problem(413, "File exceeds inline limit; fetch the bundle");
+  if (entry.size > readFileMaxBytes())
+    throw new Problem(
+      413,
+      `File exceeds the inline limit of ${megabytes(readFileMaxBytes())}; fetch the package with skillbox fetch`,
+    );
   const [f] = await loadFiles(db, r.id, [path]);
   if (!f) throw new Problem(404, "File not found");
   const bytes = Buffer.from(f.content, "base64");
@@ -505,7 +629,7 @@ export function permits(
 export async function publish(
   p: Principal,
   id: string,
-  files: SkillFile[],
+  input: SkillFileInput[],
   expectedRevision: string | null,
   message = "Update skill",
   importReferenceId?: string,
@@ -513,6 +637,9 @@ export async function publish(
     archive?: boolean;
     source?: GitHubSource | GitLabSource;
     database?: Pick<typeof db, "transaction">;
+    // Revision that sha256-only references resolve against (default: the
+    // expected revision). Restores point it at the revision being restored.
+    referenceRevision?: ReferenceSource;
   } = {},
 ) {
   if (
@@ -539,7 +666,14 @@ export async function publish(
     (expectedRevision === null && !p.permissions && !(await canRead(p, id)))
   )
     throw new Problem(403, "Publishing is not allowed");
-  validateFiles(files);
+  const { files, verified } = await resolveFileReferences(
+    p,
+    id,
+    expectedRevision,
+    input,
+    options.referenceRevision ?? expectedRevision,
+  );
+  validateFiles(files, verified);
   const meta = metadata(id, files);
   const revision = randomUUID(),
     checksum = sha256(
@@ -667,7 +801,7 @@ export async function publish(
   return { id, revision, checksum };
 }
 export async function history(p: Principal, id: string) {
-  await revisionFor(p, id);
+  await revisionRow(p, id);
   return db
     .select({
       revision: revisions.id,
@@ -741,10 +875,10 @@ export async function setDisabled(
 ) {
   if (p.role !== "admin")
     throw new Problem(403, "Only the owner can enable or disable entries");
-  const previous = await revisionFor(p, id, expectedRevision);
+  const previous = await revisionSparse(p, id, expectedRevision);
   const files = previous.files.map((f) => {
     if (f.path !== "SKILL.md") return f;
-    const source = Buffer.from(f.content, "base64").toString("utf8");
+    const source = Buffer.from(contentOf(f), "base64").toString("utf8");
     const body = source.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
     return makeFile(
       f.path,
@@ -761,6 +895,8 @@ export async function setDisabled(
     files,
     expectedRevision,
     disabled ? "Disable entry" : "Enable entry",
+    undefined,
+    { referenceRevision: previous.id },
   );
 }
 
@@ -791,7 +927,9 @@ export async function setIcon(
 ) {
   if (!permits(p, "update"))
     throw new Problem(403, "Update permission required");
-  const previous = await revisionFor(p, id, expectedRevision);
+  // Existing icon images are republished by reference; resolveIcon only
+  // needs the SKILL.md text and the icon asset being set.
+  const previous = await revisionSparse(p, id, expectedRevision);
   let sourceIcon = icon;
   let asset: SkillFile | undefined;
   if (icon?.kind === "image") {
@@ -810,7 +948,7 @@ export async function setIcon(
     .filter((f) => f.path !== asset?.path)
     .map((f) => {
       if (f.path !== "SKILL.md") return f;
-      const source = Buffer.from(f.content, "base64").toString("utf8");
+      const source = Buffer.from(contentOf(f), "base64").toString("utf8");
       const body = source.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
       return makeFile(
         f.path,
@@ -822,7 +960,17 @@ export async function setIcon(
       );
     });
   if (asset) files.push(asset);
-  return publish(p, id, files, expectedRevision, "Update skill icon");
+  return publish(
+    p,
+    id,
+    files,
+    expectedRevision,
+    "Update skill icon",
+    undefined,
+    {
+      referenceRevision: previous.id,
+    },
+  );
 }
 
 export async function setIntegrations(
@@ -833,14 +981,15 @@ export async function setIntegrations(
 ) {
   if (!permits(p, "update"))
     throw new Problem(403, "Update permission required");
-  const r = await revisionFor(p, id, expectedRevision);
+  const r = await revisionSparse(p, id, expectedRevision);
   const files = r.files.map((f) =>
     f.path !== "SKILL.md"
       ? f
       : makeFile(
           f.path,
           matter.stringify(
-            matter(Buffer.from(f.content, "base64").toString("utf8")).content,
+            matter(Buffer.from(contentOf(f), "base64").toString("utf8"))
+              .content,
             { ...r.metadata.frontmatter, executorIntegrations: integrations },
           ),
           f.executable,
@@ -852,6 +1001,8 @@ export async function setIntegrations(
     files,
     expectedRevision,
     "Update Executor integrations",
+    undefined,
+    { referenceRevision: r.id },
   );
 }
 
@@ -926,10 +1077,10 @@ export async function archiveSkill(
 ) {
   if (!permits(p, "delete"))
     throw new Problem(403, "Delete permission required");
-  const r = await revisionFor(p, id);
+  const r = await revisionSparse(p, id, undefined);
   const files = r.files.map((f) => {
     if (f.path !== "SKILL.md") return f;
-    const parsed = matter(Buffer.from(f.content, "base64").toString("utf8"));
+    const parsed = matter(Buffer.from(contentOf(f), "base64").toString("utf8"));
     return makeFile(
       f.path,
       matter.stringify(parsed.content, { ...parsed.data, archived: true }),
@@ -938,5 +1089,6 @@ export async function archiveSkill(
   });
   return publish(p, id, files, expectedRevision, "Archive skill", undefined, {
     archive: true,
+    referenceRevision: r.id,
   });
 }

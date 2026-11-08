@@ -686,8 +686,10 @@ export function ProposalsPage() {
       setBusy(false);
     }
   };
-  const base: SkillFile[] = selected?.baseFiles ?? [],
-    next: SkillFile[] = selected?.files ?? [];
+  const base: (Omit<SkillFile, "content"> & { content?: string })[] =
+      selected?.baseFiles ?? [],
+    next: (Omit<SkillFile, "content"> & { content?: string })[] =
+      selected?.files ?? [];
   const paths = [...new Set([...base, ...next].map((f) => f.path))].filter(
     (path) => {
       const a = base.find((f) => f.path === path),
@@ -782,7 +784,8 @@ export function ProposalsPage() {
                         </small>
                         {file ? (
                           <pre>
-                            {/\.(md|txt|json|ya?ml|toml|ts|tsx|js|mjs|py|sh|css|html|sql)$/.test(
+                            {file.content !== undefined &&
+                            /\.(md|txt|json|ya?ml|toml|ts|tsx|js|mjs|py|sh|css|html|sql)$/.test(
                               path,
                             )
                               ? decoded(file.content)
