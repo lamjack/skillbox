@@ -471,3 +471,5 @@ See [SECURITY.md](SECURITY.md), [deployment notes](docs/deployment.md), and [rel
 
 <p><a href="https://kitze.io/projects?ref=kitze%2Fskillbox">All projects</a> · <a href="https://github.com/kitze?ref=kitze%2Fskillbox">GitHub</a> · <a href="https://x.com/thekitze?ref=kitze%2Fskillbox">Follow on X</a> · <a href="https://youtube.com/kitze?ref=kitze%2Fskillbox">YouTube</a></p>
 <!-- readme-sync:footer:end -->
+
+Maintained with Skillbox.
