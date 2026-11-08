@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
+import { SecretField } from "./secret-field";
 import type { JevProvider } from "../shared";
 
 const names: Record<JevProvider, string> = {
@@ -9,10 +8,14 @@ const names: Record<JevProvider, string> = {
   typesafe: "TypeSafe AI",
   openrouter: "OpenRouter",
 };
-type Status = { provider: JevProvider; configured: boolean };
+type ProviderStatus = { configured: boolean; updatedAt?: string | null };
+type Status = {
+  provider: JevProvider;
+  configured: boolean;
+  providers: Record<JevProvider, ProviderStatus>;
+};
 export function GatewaySettings() {
   const [config, setConfig] = useState<Status | null>(null);
-  const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -23,7 +26,6 @@ export function GatewaySettings() {
   const update = async (provider: JevProvider, key?: string | null) => {
     setBusy(true);
     setError("");
-    setApiKey("");
     try {
       setConfig(
         await api("/settings/ai-gateway", {
@@ -41,6 +43,7 @@ export function GatewaySettings() {
     }
   };
   const provider = config?.provider ?? "vercel";
+  const current = config?.providers[provider];
   return (
     <section className="executor-settings" aria-labelledby="gateway-heading">
       <h2 id="gateway-heading">Jev recommendations</h2>
@@ -59,42 +62,20 @@ export function GatewaySettings() {
       <p>
         Tasks and authorized skill descriptions are sent to {names[provider]};
         charges apply to your account. Keys are saved separately for each
-        provider.
+        provider; without one, deterministic search is used.
       </p>
-      <p role="status">
-        {!config
-          ? "Loading…"
-          : config.configured
-            ? "Key saved"
-            : "Not configured — deterministic search only"}
-      </p>
-      <label>
-        {names[provider]} API key
-        <Input
-          type="password"
-          autoComplete="new-password"
-          value={apiKey}
-          disabled={busy || !config}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-      </label>
-      <div className="filters">
-        <Button
-          disabled={busy || !config || !apiKey.trim()}
-          onClick={() => update(provider, apiKey.trim())}
-        >
-          Save key
-        </Button>
-        {config?.configured && (
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() => update(provider, null)}
-          >
-            Remove key
-          </Button>
-        )}
-      </div>
+      <SecretField
+        key={provider}
+        label={`${names[provider]} API key`}
+        configured={!!current?.configured}
+        updatedAt={current?.updatedAt}
+        emptyPlaceholder="sk-…"
+        disabled={!config}
+        onSave={(key) => update(provider, key)}
+        onRemove={() => update(provider, null)}
+        saveLabel="Save key"
+        removeLabel="Remove key"
+      />
       {error && (
         <div className="error-note" role="alert">
           {error}
