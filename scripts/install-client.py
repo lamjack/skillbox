@@ -5,7 +5,7 @@ Usage: python3 scripts/install-client.py < protected-client-credentials.json
 Input: {"clients":{"codex":{"url":"https://...","token":"..."}, ...}}
 Existing skills and unrelated MCP settings are preserved; backups are mode 0600.
 """
-import datetime, json, os, re, shlex, shutil, subprocess, sys, urllib.request
+import datetime, hashlib, json, os, re, shlex, shutil, subprocess, sys, urllib.request
 from pathlib import Path
 import tomllib
 
@@ -42,10 +42,30 @@ def get(path):
         assert response.geturl()==base+path,'Unexpected download redirect'
         return response.read().decode()
 
+# --expected-checksums <path> substitutes a locally pinned checksums.json for
+# the server-published one (out-of-band verification channel).
+expected=None
+if '--expected-checksums' in sys.argv[1:]:
+    i=sys.argv.index('--expected-checksums')+1
+    assert i<len(sys.argv),'--expected-checksums needs a file path'
+    expected=json.loads(Path(sys.argv[i]).read_text())
+else:
+    expected=json.loads(get('/cli/checksums.json'))
+assert expected.get('algorithm')=='sha256','Unsupported checksum algorithm'
+
+def verified(path):
+    body=get(path)
+    want=expected['files'][path.lstrip('/')]
+    got=hashlib.sha256(body.encode()).hexdigest()
+    assert got==want,f'Checksum mismatch for {path} (expected {want}, got {got}) — aborting, nothing written'
+    return body
+
+# Download and verify everything before any file is written.
 install=root/'.local/share/skillbox'
-for name in ['skillbox.mjs','package.mjs']:
-    write(install/name,get('/cli/'+name),0o644)
-bootstrap=get('/bootstrap/SKILL.md')
+downloads={name:verified('/cli/'+name) for name in ['skillbox.mjs','package.mjs']}
+bootstrap=verified('/bootstrap/SKILL.md')
+for name,body in downloads.items():
+    write(install/name,body,0o644)
 write(root/'.agents/skills/skills-library/SKILL.md',bootstrap,0o644)
 for client in credentials:
     config=write(root/'.config/skillbox'/f'{client}.json',json.dumps(credentials[client],indent=2)+'\n')

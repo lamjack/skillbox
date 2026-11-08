@@ -547,8 +547,15 @@ test("released Skills protocol works with SDK v2 client, private manifests and l
     "io.modelcontextprotocol/clientInfo": { name: "native-fixture", version: "1" },
   };
   const rpc = async (method: string, params: Record<string, unknown> = {}, metadata: unknown = meta) => {
+    // Mirror the CLI bridge (cli/skillbox.mjs mcpRequestHeaders): a body envelope
+    // naming the protocol version must also send MCP-Protocol-Version.
+    const version =
+      metadata && typeof metadata === "object"
+        ? (metadata as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"]
+        : undefined;
     const response = await app.request("/mcp", {
       method: "POST", headers: { ...principalHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Method": method,
+        ...(typeof version === "string" ? { "MCP-Protocol-Version": version } : {}),
         ...(method === "resources/read" ? { "Mcp-Name": String(params.uri) } : {}),
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: metadata } }),
@@ -1024,7 +1031,7 @@ test("provider switching preserves separate encrypted keys, migrates Gateway set
     return Response.json({ model: "jev-latest", answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "score", score: 4, confidence: 0.95 }])), usage: direct ? { input_tokens: 100, output_tokens: 10 } : { inputTokens: 100, outputTokens: 10 } });
   }) as typeof fetch;
   try {
-    await connection`UPDATE workspace_settings SET value=${JSON.stringify(seal({ revision: "legacy-gateway-fixture", apiKey: "fixture-vercel-key" }))}::jsonb WHERE id='ai_gateway'`;
+    await connection`UPDATE workspace_settings SET value=${JSON.stringify(await seal({ revision: "legacy-gateway-fixture", apiKey: "fixture-vercel-key" }))}::jsonb WHERE id='ai_gateway'`;
     expect(await gatewaySettings()).toMatchObject({ provider: "vercel", configured: true, providers: { typesafe: { configured: false } } });
     expect((await recommendSkills(principal, { task: "Quality" })).provider).toBe("vercel");
     await configureGateway({ provider: "typesafe" });

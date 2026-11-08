@@ -337,10 +337,23 @@ export function createMcp(
   return server;
 }
 export async function handleMcp(request: Request, p: Principal) {
-  const body = await request
-    .clone()
-    .json()
-    .catch(() => null);
+  // The v2 SDK classifies via request.clone() and the transports then read the
+  // body again; under Bun.serve a consumed clone leaves the original stream
+  // empty, so read the body once and hand fresh Requests to each stage.
+  const rawBody = request.method === "POST" ? await request.text() : "";
+  const body = (() => {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      return null;
+    }
+  })();
+  const fresh = () =>
+    new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      ...(rawBody ? { body: rawBody } : {}),
+    });
   if (body?.method === "initialize" || body?.method === "server/discover") {
     const name =
       body.params?.clientInfo?.name ??
@@ -349,28 +362,28 @@ export async function handleMcp(request: Request, p: Principal) {
       harness: typeof name === "string" ? name.slice(0, 160) : undefined,
     });
   }
-  if (!(await isLegacyRequest(request))) {
+  if (!(await isLegacyRequest(fresh(), body ?? undefined))) {
     const handler = createMcpHandler(
-      () => createMcp(p, () => authenticate(request), true),
+      () => createMcp(p, () => authenticate(fresh()), true),
       // Current handlers emit no mid-call messages, so auto mode returns JSON.
       // Explicit json mode warns on every per-request handler construction.
       { legacy: "reject" },
     );
     try {
-      return await handler.fetch(request);
+      return await handler.fetch(fresh());
     } finally {
       await handler.close();
     }
   }
   // Preserve JSON-only legacy replies required by the deployed stdio bridge.
-  const server = createMcp(p, () => authenticate(request));
+  const server = createMcp(p, () => authenticate(fresh()));
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
   await server.connect(transport);
   try {
-    return await transport.handleRequest(request);
+    return await transport.handleRequest(fresh());
   } finally {
     await server.close();
   }

@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { connection, migrate } from "../src/server/db";
 import { open, seal } from "../src/server/secret-storage";
 import {
   allowedOrigins,
@@ -40,23 +42,58 @@ test("neutral defaults and explicit origin aliases", () => {
   }
 });
 
-test("stored secrets use authenticated encryption and fail closed after token changes", () => {
+test("stored secrets use authenticated encryption, migrate legacy ciphertexts and fail closed after token changes", async () => {
+  await migrate();
   const previous = process.env.SKILLBOX_ADMIN_TOKEN;
   process.env.SKILLBOX_ADMIN_TOKEN =
     "isolated-test-owner-token-at-least-32-chars";
   try {
-    const encrypted = seal({ apiKey: "fixture-secret" });
+    const encrypted = await seal({ apiKey: "fixture-secret" });
     expect(JSON.stringify(encrypted)).not.toContain("fixture-secret");
-    expect(open(encrypted)).toEqual({ apiKey: "fixture-secret" });
-    expect(seal({ apiKey: "fixture-secret" })).not.toEqual(encrypted);
-    expect(() =>
+    expect(encrypted.data.startsWith("v2:")).toBe(true);
+    expect(await open(encrypted)).toEqual({ apiKey: "fixture-secret" });
+    expect(await seal({ apiKey: "fixture-secret" })).not.toEqual(encrypted);
+    await expect(
       open({ ...encrypted, tag: Buffer.alloc(16).toString("base64") }),
-    ).toThrow();
+    ).rejects.toThrow();
+
+    // A legacy ciphertext (SHA-256 key, no v2 prefix) still opens, and when a
+    // settings row is named it is re-sealed under the v2 key in place.
+    const legacyKey = createHash("sha256")
+      .update(process.env.SKILLBOX_ADMIN_TOKEN)
+      .digest();
+    const legacyIv = randomBytes(12);
+    const legacyCipher = createCipheriv("aes-256-gcm", legacyKey, legacyIv);
+    const legacyBytes = Buffer.concat([
+      legacyCipher.update(JSON.stringify({ apiKey: "legacy-secret" })),
+      legacyCipher.final(),
+    ]);
+    const legacySealed = {
+      iv: legacyIv.toString("base64"),
+      tag: legacyCipher.getAuthTag().toString("base64"),
+      data: legacyBytes.toString("base64"),
+    };
+    expect(await open(legacySealed)).toEqual({ apiKey: "legacy-secret" });
+    await connection`INSERT INTO workspace_settings(id, value) VALUES ('crypto_test_legacy', ${JSON.stringify(legacySealed)}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+    expect(await open(legacySealed, "crypto_test_legacy")).toEqual({
+      apiKey: "legacy-secret",
+    });
+    const [migrated] =
+      await connection`SELECT value FROM workspace_settings WHERE id='crypto_test_legacy'`;
+    expect(
+      (migrated.value as { data: string }).data.startsWith("v2:"),
+    ).toBe(true);
+    expect(await open(migrated.value as typeof legacySealed)).toEqual({
+      apiKey: "legacy-secret",
+    });
+    await connection`DELETE FROM workspace_settings WHERE id='crypto_test_legacy'`;
+
     process.env.SKILLBOX_ADMIN_TOKEN =
       "different-test-owner-token-at-least-32-chars";
-    expect(() => open(encrypted)).toThrow();
+    await expect(open(encrypted)).rejects.toThrow();
+    await expect(open(legacySealed)).rejects.toThrow();
     delete process.env.SKILLBOX_ADMIN_TOKEN;
-    expect(() => seal({ apiKey: "fixture-secret" })).toThrow();
+    await expect(seal({ apiKey: "fixture-secret" })).rejects.toThrow();
   } finally {
     if (previous === undefined) delete process.env.SKILLBOX_ADMIN_TOKEN;
     else process.env.SKILLBOX_ADMIN_TOKEN = previous;
