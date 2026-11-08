@@ -488,6 +488,8 @@ test("MCP Resources and manifest previews preserve grants, integrity and legacy 
     null,
   );
   const client = await createClient("Resources fixture", "reader", false, [id]);
+  const previousCatalog = process.env.SKILLBOX_MCP_RESOURCE_CATALOG;
+  process.env.SKILLBOX_MCP_RESOURCE_CATALOG = "true";
   const rpc = async (
     method: string,
     params: unknown = {},
@@ -589,6 +591,9 @@ test("MCP Resources and manifest previews preserve grants, integrity and legacy 
     await archiveSkill(ADMIN, id, enabled.revision);
     expect((await rpc("resources/read", { uri })).error.code).toBe(-32602);
   } finally {
+    if (previousCatalog === undefined)
+      delete process.env.SKILLBOX_MCP_RESOURCE_CATALOG;
+    else process.env.SKILLBOX_MCP_RESOURCE_CATALOG = previousCatalog;
     await db.delete(events).where(eq(events.clientId, client.id));
     await db.delete(clients).where(eq(clients.id, client.id));
   }
