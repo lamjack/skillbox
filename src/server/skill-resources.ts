@@ -1,7 +1,9 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { skills, revisions } from "./schema";
+import { listFiles, loadFiles } from "./revision-files";
 import * as library from "./library";
+import { mcpResourceMaxBytes, megabytes } from "./config";
 import type { Principal } from "../shared";
 import {
   inspectSkillPackage,
@@ -11,6 +13,19 @@ import {
 
 const PAGE_SIZE = 25;
 const unavailable = () => new library.Problem(404, "Skill resource not found");
+
+// The audit needs every entry's path/digest/size, but only SKILL.md's bytes.
+async function packageFiles(revisionId: string) {
+  const [entries, [main]] = await Promise.all([
+    listFiles(db, revisionId),
+    loadFiles(db, revisionId, ["SKILL.md"]),
+  ]);
+  return entries.map((entry) =>
+    entry.path === "SKILL.md" && main
+      ? { ...entry, content: main.content }
+      : entry,
+  );
+}
 
 async function activeRevision(p: Principal, id: string) {
   id = await library.resolveReferenceId(id);
@@ -41,7 +56,7 @@ export async function manifestFor(p: Principal, id: string) {
   const result = inspectSkillPackage(
     skill.referenceId,
     skill.id,
-    revision.files,
+    await packageFiles(revision.id),
   );
   if (!result.manifest)
     throw new library.Problem(
@@ -83,14 +98,18 @@ export async function manifestPage(p: Principal, cursor?: string) {
     .orderBy(skills.id)
     .limit(PAGE_SIZE + 1)
     .offset(offset);
-  const entries = rows.slice(0, PAGE_SIZE).flatMap(({ skill, revision }) => {
-    const { manifest } = inspectSkillPackage(
-      skill.referenceId,
-      skill.id,
-      revision.files,
-    );
-    return manifest ? [manifest] : [];
-  });
+  const entries = (
+    await Promise.all(
+      rows.slice(0, PAGE_SIZE).map(async ({ skill, revision }) => {
+        const { manifest } = inspectSkillPackage(
+          skill.referenceId,
+          skill.id,
+          await packageFiles(revision.id),
+        );
+        return manifest;
+      }),
+    )
+  ).flatMap((manifest) => (manifest ? [manifest] : []));
   await library.record(p, "browse");
   return {
     skills: entries,
@@ -122,13 +141,18 @@ export async function readResource(p: Principal, uri: string) {
   }
   const { skill, revision } = await activeRevision(p, address.referenceId);
   if (skill.id !== address.name) throw unavailable();
-  const result = inspectSkillPackage(
-    skill.referenceId,
-    skill.id,
-    revision.files,
-  );
+  const files = await packageFiles(revision.id);
+  const result = inspectSkillPackage(skill.referenceId, skill.id, files);
   if (!result.manifest) throw unavailable();
-  const file = revision.files.find((entry) => entry.path === address.path);
+  const entry = files.find((f) => f.path === address.path);
+  if (!entry) throw unavailable();
+  const limit = mcpResourceMaxBytes();
+  if (entry.size > limit)
+    throw new library.Problem(
+      413,
+      `Resource exceeds the inline limit of ${megabytes(limit)}; fetch the skill on the execution host with skillbox fetch`,
+    );
+  const [file] = await loadFiles(db, revision.id, [address.path]);
   if (!file) throw unavailable();
   const content = resourceContent(uri, file);
   // A resource read is not activation or execution. Reuse read_file, not load.
@@ -149,11 +173,17 @@ export async function compatibilityPage(p: Principal, offset = 0) {
   ]);
   const items = [];
   for (const item of page.items) {
-    const revision = await library.revisionFor(p, item.id, item.revision);
+    const [revision] = await db
+      .select({ id: revisions.id })
+      .from(revisions)
+      .where(
+        and(eq(revisions.id, item.revision), eq(revisions.skillId, item.id)),
+      );
+    if (!revision) throw unavailable();
     const { compatible, issues } = inspectSkillPackage(
       item.referenceId!,
       item.id,
-      revision.files,
+      await packageFiles(revision.id),
     );
     items.push({
       id: item.id,

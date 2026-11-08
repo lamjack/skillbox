@@ -100,6 +100,16 @@ For prebuilt deployments, set the new image reference and use `upgrade-image`. B
 
 `stop` preserves all data. Do not run `docker compose down -v` against an installation you want to retain.
 
+## Revision file storage migration
+
+From this version, revision file contents are stored content-addressed: file bytes in `blobs` (keyed by sha256, shared across revisions) and per-revision listings in `revision_files`. They no longer live in the single `revisions.files` jsonb column, which Postgres limits to 255 MiB. Pending proposals use the same layout through `proposal_files`; the legacy `proposals.files` column is backfilled and dropped the same way.
+
+On first start after upgrading, the app backfills every existing revision from the legacy column one revision per transaction, then drops the column. The migration is idempotent: if interrupted, the next start resumes with the remaining revisions.
+
+Rollback: restore the pre-upgrade `pg_dump` taken per the backup section and start the previous image. There is no in-place reverse migration, because the legacy column cannot hold revisions above the 255 MiB limit.
+
+`SKILLBOX_MCP_RESOURCE_MAX_BYTES` (default `8000000`) caps the file size served inline by MCP `resources/read`; larger files require fetching the skill on the execution host with `skillbox fetch`.
+
 ## Diagnose without dumping configuration
 
 ```sh

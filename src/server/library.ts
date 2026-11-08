@@ -10,6 +10,7 @@ import matter from "gray-matter";
 import { and, eq, desc, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { skills, revisions, events } from "./schema";
+import { listFiles, loadFiles, storeFiles } from "./revision-files";
 import type {
   Principal,
   SkillFile,
@@ -378,7 +379,7 @@ export async function recommendSkills(
     ...(configured ? { provider: configured.provider } : {}),
   };
 }
-export async function revisionFor(p: Principal, id: string, revision?: string) {
+export async function revisionRow(p: Principal, id: string, revision?: string) {
   id = await resolveReferenceId(id);
   if (!(await canRead(p, id)))
     throw new Problem(404, "Skill or revision not found");
@@ -393,9 +394,13 @@ export async function revisionFor(p: Principal, id: string, revision?: string) {
   if (!r) throw new Problem(404, "Skill or revision not found");
   return r;
 }
+export async function revisionFor(p: Principal, id: string, revision?: string) {
+  const r = await revisionRow(p, id, revision);
+  return { ...r, files: await loadFiles(db, r.id) };
+}
 export async function load(p: Principal, id: string, revision?: string) {
   id = await resolveReferenceId(id);
-  const r = await revisionFor(p, id, revision);
+  const r = await revisionRow(p, id, revision);
   let composition;
   if (r.metadata.kind === "bundle") {
     const nodes = await db.select().from(skills);
@@ -437,10 +442,11 @@ export async function load(p: Principal, id: string, revision?: string) {
     .select({ referenceId: skills.referenceId })
     .from(skills)
     .where(eq(skills.id, id));
-  const instructions = Buffer.from(
-    r.files.find((f) => f.path === "SKILL.md")!.content,
-    "base64",
-  ).toString("utf8");
+  const [[main], fileList] = await Promise.all([
+    loadFiles(db, r.id, ["SKILL.md"]),
+    listFiles(db, r.id),
+  ]);
+  const instructions = Buffer.from(main!.content, "base64").toString("utf8");
   return {
     id,
     referenceId: current!.referenceId,
@@ -449,11 +455,8 @@ export async function load(p: Principal, id: string, revision?: string) {
     checksum: r.checksum,
     source: r.source ?? null,
     metadata: { ...r.metadata, disabled: r.metadata.disabled ?? false },
-    instructions: Buffer.from(
-      r.files.find((f) => f.path === "SKILL.md")!.content,
-      "base64",
-    ).toString("utf8"),
-    files: r.files.map(({ content, ...f }) => f),
+    instructions,
+    files: fileList,
     ...(composition ? { composition } : {}),
     portability:
       "Fetch this exact revision on the execution host with skillbox fetch. Use returned directory as the base for relative references and bundled scripts. Historical absolute machine paths may need host-specific setup; fetching never installs dependencies.",
@@ -466,12 +469,14 @@ export async function readFile(
   path: string,
 ) {
   id = await resolveReferenceId(id);
-  const r = await revisionFor(p, id, revision);
+  const r = await revisionRow(p, id, revision);
   safePath(path);
-  const f = r.files.find((f) => f.path === path);
-  if (!f) throw new Problem(404, "File not found");
-  if (f.size > 160_000)
+  const entry = (await listFiles(db, r.id)).find((f) => f.path === path);
+  if (!entry) throw new Problem(404, "File not found");
+  if (entry.size > 160_000)
     throw new Problem(413, "File exceeds inline limit; fetch the bundle");
+  const [f] = await loadFiles(db, r.id, [path]);
+  if (!f) throw new Problem(404, "File not found");
   const bytes = Buffer.from(f.content, "base64");
   if (bytes.includes(0))
     throw new Problem(415, "Binary file; fetch the bundle");
@@ -643,13 +648,13 @@ export async function publish(
     await tx.insert(revisions).values({
       id: revision,
       skillId: id,
-      files,
       metadata: meta,
       source: options.source,
       checksum,
       message: message.slice(0, 200),
       author: p.name,
     });
+    await storeFiles(tx, revision, files);
     await tx.insert(events).values({
       id: randomUUID(),
       clientId: p.id,

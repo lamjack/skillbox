@@ -1,9 +1,13 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach } from "bun:test";
+import { resetImportLimit } from "../src/server/import-limit";
 import {
   parseGitHubUrl,
   prepareGitHubImport,
 } from "../src/server/github-import";
 import { githubFixture, IMPORT_COMMIT } from "./fixtures/github-import";
+
+// Other files share this process's per-process import pool.
+beforeEach(resetImportLimit);
 
 test("GitHub URL parser accepts repository/folder/file links and rejects remote/path tricks", () => {
   expect(parseGitHubUrl("https://github.com/fixture/skills.git")).toMatchObject(
@@ -147,9 +151,9 @@ test("per-file import limit follows SKILLBOX_IMPORT_MAX_FILE_BYTES", async () =>
     const result = await prepareGitHubImport({ url });
     expect(result.kind).toBe("skill");
     if (result.kind === "skill")
-      expect(
-        result.files.some((file) => file.path === "assets/big.bin"),
-      ).toBe(true);
+      expect(result.files.some((file) => file.path === "assets/big.bin")).toBe(
+        true,
+      );
   } finally {
     globalThis.fetch = previous;
     if (savedFileBytes === undefined)

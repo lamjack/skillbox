@@ -3,6 +3,7 @@ import { and, eq, sql, desc } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
 import { profiles, clients, proposals } from "./schema";
+import { loadProposalFiles, storeProposalFiles } from "./revision-files";
 import { assertAdmin, createClient } from "./auth";
 import * as lib from "./library";
 import type { Principal, SkillFile } from "../shared";
@@ -107,18 +108,21 @@ export async function propose(
         403,
         "Proposals can change skill content, not access or lifecycle settings",
       );
-  const [row] = await db
-    .insert(proposals)
-    .values({
-      id: randomUUID(),
-      skillId: id,
-      clientId: p.id,
-      clientName: p.name,
-      files,
-      expectedRevision,
-      message,
-    })
-    .returning({ id: proposals.id, status: proposals.status });
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(proposals)
+      .values({
+        id: randomUUID(),
+        skillId: id,
+        clientId: p.id,
+        clientName: p.name,
+        expectedRevision,
+        message,
+      })
+      .returning({ id: proposals.id, status: proposals.status });
+    await storeProposalFiles(tx, created!.id, files);
+    return created!;
+  });
   await lib.record(p, "propose", id, { revision: expectedRevision });
   return row;
 }
@@ -152,7 +156,11 @@ export async function proposalDetail(p: Principal, id: string) {
     proposal.skillId,
     proposal.expectedRevision,
   );
-  return { ...proposal, baseFiles: base.files };
+  return {
+    ...proposal,
+    files: await loadProposalFiles(db, proposal.id),
+    baseFiles: base.files,
+  };
 }
 export async function reviewProposal(
   p: Principal,
@@ -174,7 +182,7 @@ export async function reviewProposal(
         ? await lib.publish(
             { ...p, name: `${p.name} (proposal by ${proposal.clientName})` },
             proposal.skillId,
-            proposal.files,
+            await loadProposalFiles(tx, proposal.id),
             proposal.expectedRevision,
             proposal.message,
             undefined,

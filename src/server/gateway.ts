@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { connection } from "./db";
-import { seal, open } from "./secret-storage";
+import { seal, openStored, UNREADABLE } from "./secret-storage";
+import type { SecretState } from "./secret-storage";
 import {
   createRecommender,
   evaluateJev,
@@ -65,16 +66,19 @@ export const gatewayInput = z
     (value) => value.provider !== undefined || value.apiKey !== undefined,
     "Choose a provider or update its key",
   );
-async function decode(value?: unknown): Promise<Config> {
-  return value
-    ? configSchema.parse(
-        await open(value as Parameters<typeof open>[0], "ai_gateway"),
-      )
+type StoredConfig = Config & { secretState: SecretState };
+async function decode(value?: unknown): Promise<StoredConfig> {
+  const opened = value
+    ? await openStored(value as Parameters<typeof openStored>[0], "ai_gateway")
+    : undefined;
+  return opened !== undefined && opened !== UNREADABLE
+    ? { ...configSchema.parse(opened), secretState: "readable" }
     : {
         revision: "unconfigured",
         provider: "vercel",
         keys: { vercel: null, typesafe: null, openrouter: null },
         updatedAt: { vercel: null, typesafe: null, openrouter: null },
+        secretState: opened === UNREADABLE ? "unreadable" : "readable",
       };
 }
 async function readConfig() {
@@ -82,10 +86,11 @@ async function readConfig() {
     await connection`SELECT value FROM workspace_settings WHERE id='ai_gateway'`;
   return decode(row?.value);
 }
-function status(config: Config) {
+function status(config: StoredConfig) {
   return {
     provider: config.provider,
     configured: !!config.keys[config.provider],
+    secretState: config.secretState,
     providers: {
       vercel: {
         configured: !!config.keys.vercel,
@@ -130,8 +135,9 @@ export async function configureGateway(input: z.input<typeof gatewayInput>) {
         : null;
     }
     config.revision = randomUUID();
-    await tx`INSERT INTO workspace_settings(id,value) VALUES ('ai_gateway',${JSON.stringify(await seal(config))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
-    return status(config);
+    const { secretState: _, ...stored } = config;
+    await tx`INSERT INTO workspace_settings(id,value) VALUES ('ai_gateway',${JSON.stringify(await seal(stored))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+    return status({ ...stored, secretState: "readable" });
   });
   engine = undefined;
   return result;

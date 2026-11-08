@@ -81,9 +81,9 @@ test("stored secrets use authenticated encryption, migrate legacy ciphertexts an
     });
     const [migrated] =
       await connection`SELECT value FROM workspace_settings WHERE id='crypto_test_legacy'`;
-    expect(
-      (migrated.value as { data: string }).data.startsWith("v2:"),
-    ).toBe(true);
+    expect((migrated.value as { data: string }).data.startsWith("v2:")).toBe(
+      true,
+    );
     expect(await open(migrated.value as typeof legacySealed)).toEqual({
       apiKey: "legacy-secret",
     });
@@ -127,6 +127,55 @@ test("setup creates unique private credentials without printing or overwriting t
     expect(await readFile(join(dir, ".env"), "utf8")).toBe(env);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("secrets sealed under a previous admin token read as unconfigured and are overwritten by a new save", async () => {
+  await migrate();
+  const headers = {
+    Authorization: "Bearer " + process.env.SKILLBOX_ADMIN_TOKEN,
+    "Content-Type": "application/json",
+  };
+  const current = process.env.SKILLBOX_ADMIN_TOKEN;
+  process.env.SKILLBOX_ADMIN_TOKEN =
+    "rotated-fixture-admin-token-" + randomBytes(8).toString("hex");
+  try {
+    for (const [id, value] of [
+      ["ai_gateway", { revision: "r", provider: "vercel", apiKey: "sk-old" }],
+      [
+        "gitlab_import",
+        { token: "glpat-old", updatedAt: new Date().toISOString() },
+      ],
+      ["executor", { endpoint: "https://old.example" }],
+    ] as const) {
+      const sealed = JSON.stringify(await seal(value));
+      await connection`INSERT INTO workspace_settings(id,value) VALUES (${id},${sealed}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+    }
+  } finally {
+    process.env.SKILLBOX_ADMIN_TOKEN = current;
+  }
+  try {
+    for (const path of ["ai-gateway", "gitlab-import", "executor"]) {
+      const response = await app.request(`/api/settings/${path}`, { headers });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.configured).toBe(false);
+      expect(body.secretState).toBe("unreadable");
+      expect(JSON.stringify(body)).not.toMatch(/sk-old|glpat-old|old\.example/);
+    }
+    const saved = await app.request("/api/settings/ai-gateway", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ provider: "vercel", apiKey: "sk-fixture-new" }),
+    });
+    expect(saved.status).toBe(200);
+    const gateway = await (
+      await app.request("/api/settings/ai-gateway", { headers })
+    ).json();
+    expect(gateway.configured).toBe(true);
+    expect(gateway.secretState).toBe("readable");
+  } finally {
+    await connection`DELETE FROM workspace_settings WHERE id IN ('ai_gateway','gitlab_import','executor')`;
   }
 });
 

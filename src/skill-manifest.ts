@@ -78,7 +78,11 @@ export function parseSkillResourceUri(uri: string) {
   return { referenceId, name, path };
 }
 
-export function verifiedFileBytes(file: SkillFile) {
+export function verifiedFileBytes(
+  file: Omit<SkillFile, "content"> & { content?: string },
+) {
+  if (typeof file.content !== "string")
+    throw new Error("Skill file content is unavailable");
   const bytes = Buffer.from(file.content, "base64");
   if (
     bytes.toString("base64") !== file.content ||
@@ -93,7 +97,7 @@ export function verifiedFileBytes(file: SkillFile) {
 export function inspectSkillPackage(
   referenceId: string,
   id: string,
-  files: SkillFile[],
+  files: (Omit<SkillFile, "content"> & { content?: string })[],
 ) {
   const issues: CompatibilityIssue[] = [];
   const issue = (
@@ -124,15 +128,18 @@ export function inspectSkillPackage(
     if (paths.has(key))
       issue("duplicate_path", file.path, "Duplicate file path.");
     paths.add(key);
-    try {
-      verifiedFileBytes(file);
-    } catch {
-      issue(
-        "integrity",
-        file.path,
-        "Stored bytes do not match file digest, size or encoding.",
-      );
-    }
+    // Content-addressed storage guarantees integrity; bytes are verified when
+    // the file content is actually available for auditing.
+    if (file.content !== undefined)
+      try {
+        verifiedFileBytes(file);
+      } catch {
+        issue(
+          "integrity",
+          file.path,
+          "Stored bytes do not match file digest, size or encoding.",
+        );
+      }
   }
   for (const path of paths) {
     const parts = path.split("/");

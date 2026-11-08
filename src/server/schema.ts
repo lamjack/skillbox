@@ -5,9 +5,17 @@ import {
   jsonb,
   timestamp,
   boolean,
+  integer,
   index,
+  primaryKey,
+  customType,
 } from "drizzle-orm/pg-core";
-import type { SkillFile, SkillMetadata, GitHubSource, GitLabSource } from "../shared";
+import type {
+  SkillFile,
+  SkillMetadata,
+  GitHubSource,
+  GitLabSource,
+} from "../shared";
 export const skills = pgTable("skills", {
   referenceId: text("reference_id")
     .notNull()
@@ -41,7 +49,6 @@ export const revisions = pgTable(
       .notNull()
       .references(() => skills.id),
     metadata: jsonb("metadata").$type<SkillMetadata>().notNull(),
-    files: jsonb("files").$type<SkillFile[]>().notNull(),
     source: jsonb("source").$type<GitHubSource | GitLabSource>(),
     checksum: text("checksum").notNull(),
     message: text("message").notNull(),
@@ -51,6 +58,27 @@ export const revisions = pgTable(
       .defaultNow(),
   },
   (t) => [index("revisions_skill_idx").on(t.skillId)],
+);
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
+export const blobs = pgTable("blobs", {
+  sha256: text("sha256").primaryKey(),
+  size: integer("size").notNull(),
+  content: bytea("content").notNull(),
+});
+export const revisionFiles = pgTable(
+  "revision_files",
+  {
+    revisionId: text("revision_id")
+      .notNull()
+      .references(() => revisions.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    sha256: text("sha256")
+      .notNull()
+      .references(() => blobs.sha256),
+    size: integer("size").notNull(),
+    executable: boolean("executable").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.revisionId, t.path] })],
 );
 export const profiles = pgTable("profiles", {
   id: text("id").primaryKey(),
@@ -70,7 +98,6 @@ export const proposals = pgTable("proposals", {
   clientId: text("client_id").notNull(),
   clientName: text("client_name").notNull(),
   expectedRevision: text("expected_revision").notNull(),
-  files: jsonb("files").$type<SkillFile[]>().notNull(),
   message: text("message").notNull(),
   status: text("status").notNull().default("pending"),
   createdAt: timestamp("created_at", { mode: "string", withTimezone: true })
@@ -80,6 +107,21 @@ export const proposals = pgTable("proposals", {
   reviewer: text("reviewer"),
   publishedRevision: text("published_revision"),
 });
+export const proposalFiles = pgTable(
+  "proposal_files",
+  {
+    proposalId: text("proposal_id")
+      .notNull()
+      .references(() => proposals.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    sha256: text("sha256")
+      .notNull()
+      .references(() => blobs.sha256),
+    size: integer("size").notNull(),
+    executable: boolean("executable").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.proposalId, t.path] })],
+);
 export const clients = pgTable("clients", {
   profileId: text("profile_id")
     .notNull()
