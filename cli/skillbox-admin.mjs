@@ -112,13 +112,14 @@ const TOOLS = [
   },
   {
     name: "upsert_bundle",
-    description: "Create or update a bundle's members, title and description.",
+    description:
+      "Create or update a bundle's members, title and description. On update, omitted name/description keep the current values; on creation they default to the ID and a member summary. Up to 200 members.",
     inputSchema: obj(
       {
         id: str(),
         name: str(),
         description: str(),
-        members: { type: "array", items: str() },
+        members: { type: "array", items: str(), maxItems: 200 },
       },
       ["id", "members"],
     ),
@@ -126,9 +127,15 @@ const TOOLS = [
       const existing = await request("GET", `/api/skills/${enc(id)}`).catch(
         () => null,
       );
+      // The REST route requires non-empty title and description.
+      const fallback = `Bundle of ${members.length} skill${members.length === 1 ? "" : "s"}: ${members.join(", ")}`;
       return request("PUT", `/api/bundles/${enc(id)}`, {
-        title: name ?? existing?.title ?? id,
-        description: description ?? existing?.description ?? "",
+        title: (name ?? existing?.metadata?.title ?? id).slice(0, 160),
+        description: (
+          description ??
+          existing?.metadata?.description ??
+          fallback
+        ).slice(0, 3000),
         members,
         expectedRevision: existing?.revision ?? null,
       });
@@ -196,11 +203,13 @@ const TOOLS = [
         (p) => p.id === id,
       );
       if (!current) throw new Error(`Profile ${id} not found`);
-      const perms = permissions ?? {
-        create: current.permissions.create,
-        update: current.permissions.update,
-        archive: current.permissions.delete,
-        proposal: current.permissions.propose,
+      // Merge per key: the REST route requires every permission flag, while
+      // the tool accepts a partial object.
+      const perms = {
+        create: permissions?.create ?? current.permissions.create,
+        update: permissions?.update ?? current.permissions.update,
+        archive: permissions?.archive ?? current.permissions.delete,
+        proposal: permissions?.proposal ?? current.permissions.propose,
       };
       return request("PUT", `/api/profiles/${enc(id)}`, {
         name: name ?? current.name,
@@ -358,7 +367,6 @@ const TOOLS = [
       {
         id: str(),
         decision: { type: "string", enum: ["approve", "reject"] },
-        note: str(),
       },
       ["id", "decision"],
     ),

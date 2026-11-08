@@ -161,6 +161,22 @@ test(
     expect(clientText).toContain("Key shown once; store it now.");
     const client = JSON.parse(clientText.slice(clientText.indexOf("\n") + 1));
     expect(client.key ?? client.token ?? client.secret).toBeTruthy();
+
+    // Optional tool fields must still satisfy the REST schemas: a bundle
+    // created without name/description, and a partial permissions update.
+    const msgs5 = await rpc([
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "upsert_bundle", arguments: { id: "admin-cli-bare-" + randomUUID().slice(0, 6), members: [seedId] } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "update_profile", arguments: { id: profileId, permissions: { proposal: true } } } },
+    ]);
+    const bare = JSON.parse(msgs5[1].result.content[0].text);
+    expect(bare.id).toContain("admin-cli-bare-");
+    const bareDetail = JSON.parse(
+      (await rpc([{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_skill", arguments: { id: bare.id } } }]))[1].result.content[0].text,
+    );
+    expect(bareDetail.metadata.description).toContain(seedId);
+    expect(msgs5[2].result.isError).toBeFalsy();
+    const updated = JSON.parse(msgs5[2].result.content[0].text);
+    expect(updated.permissions).toMatchObject({ propose: true, create: false });
   },
   90_000,
 );
