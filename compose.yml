@@ -13,7 +13,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-    mem_limit: 512m
+    mem_limit: 4g
   app:
     image: ${SKILLBOX_IMAGE:-skillbox:local}
     build: .
@@ -29,6 +29,10 @@ services:
       SKILLBOX_ALLOWED_ORIGINS: ${SKILLBOX_ALLOWED_ORIGINS:-}
       SKILLBOX_GITLAB_HOST: ${SKILLBOX_GITLAB_HOST:-}
       SKILLBOX_EXECUTOR_RESOURCE_ALIASES: ${SKILLBOX_EXECUTOR_RESOURCE_ALIASES:-}
+      SKILLBOX_IMPORT_MAX_FILES: ${SKILLBOX_IMPORT_MAX_FILES:-400}
+      SKILLBOX_IMPORT_MAX_BYTES: ${SKILLBOX_IMPORT_MAX_BYTES:-8000000}
+      SKILLBOX_IMPORT_MAX_FILE_BYTES: ${SKILLBOX_IMPORT_MAX_FILE_BYTES:-2000000}
+      SKILLBOX_IMPORT_BATCH_TIMEOUT_MS: ${SKILLBOX_IMPORT_BATCH_TIMEOUT_MS:-180000}
     ports:
       - "${SKILLBOX_BIND_ADDRESS:-127.0.0.1}:${SKILLBOX_PORT:-4791}:4791"
     volumes:
@@ -40,7 +44,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 512m
+    mem_limit: 4g
     healthcheck:
       test:
         [

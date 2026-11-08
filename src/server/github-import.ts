@@ -6,6 +6,13 @@ import { excludedImportPath, hasEmbeddedSecret } from "../skill-import-safety";
 import type { SkillFile, GitHubSource } from "../shared";
 import { Problem, safePath, validateFiles, metadata } from "./library";
 import { claimImport } from "./import-limit";
+import {
+  importLimitMessage,
+  importMaxBytes,
+  importMaxFileBytes,
+  importMaxFiles,
+  megabytes,
+} from "./config";
 
 export const githubImportInput = z
   .object({
@@ -15,9 +22,7 @@ export const githubImportInput = z
   .strict();
 const SHA = /^[0-9a-f]{40}$/;
 const API = "https://api.github.com";
-const MAX_FILES = 400,
-  MAX_BYTES = 8_000_000,
-  MAX_FILE_BYTES = 2_000_000;
+const apiResponseLimit = () => Math.max(4_000_000, importMaxFileBytes());
 type Entry = {
   path: string;
   mode: string;
@@ -131,7 +136,9 @@ export async function githubJson(
       );
     throw new Problem(502, "GitHub request failed");
   }
-  return JSON.parse((await boundedBytes(response, 4_000_000)).toString("utf8"));
+  return JSON.parse(
+    (await boundedBytes(response, apiResponseLimit())).toString("utf8"),
+  );
 }
 const encodePath = (path: string) =>
   path.split("/").map(encodeURIComponent).join("/");
@@ -294,23 +301,20 @@ const entries = resolved.entries.filter((e) => {
     !SHA.test(e.sha) ||
     !Number.isSafeInteger(e.size) ||
     e.size! < 0 ||
-    e.size! > MAX_FILE_BYTES
+    e.size! > importMaxFileBytes()
   )
     throw new Problem(
       413,
-      `File exceeds 2 MB or has invalid metadata: ${relative}`,
+      `File exceeds ${megabytes(importMaxFileBytes())} or has invalid metadata: ${relative}`,
     );
   return true;
 });
 if (
   !entries.length ||
-  entries.length > MAX_FILES ||
-  entries.reduce((n, e) => n + e.size!, 0) > MAX_BYTES
+  entries.length > importMaxFiles() ||
+  entries.reduce((n, e) => n + e.size!, 0) > importMaxBytes()
 )
-  throw new Problem(
-    413,
-    "Imports are limited to 400 files and 8 MB per skill",
-  );
+  throw new Problem(413, importLimitMessage());
 const files: SkillFile[] = new Array(entries.length);
 let next = 0;
 const cancel = new AbortController();
@@ -336,7 +340,7 @@ try {
               "Could not download a pinned GitHub file",
             );
           }
-          const bytes = await boundedBytes(response, MAX_FILE_BYTES);
+          const bytes = await boundedBytes(response, importMaxFileBytes());
           if (
             /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
               bytes.subarray(0, 100).toString("utf8"),

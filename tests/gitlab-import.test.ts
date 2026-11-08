@@ -116,17 +116,25 @@ test("GitLab preview follows tree pagination and pins the commit", async () => {
 });
 
 test("GitLab import fails closed on tampered files, symlinks and submodules", async () => {
-  for (const [options, message] of [
-    [{ corrupt: true }, "does not match its pinned tree"],
-    [{ secret: true }, "Possible embedded secret"],
-    [{ mode: "120000" }, "Symlinks and submodules"],
-    [{ mode: "160000", type: "commit" }, "Symlinks and submodules"],
-    [{ oversized: true }, "exceeds import limits"],
-  ] as const) {
-    const fixture = gitlabFixture("example", options);
-    await withFetch(fixture, () =>
-      expect(prepareGitLabImport({ url: treeUrl })).rejects.toThrow(message),
-    );
+  const savedFileBytes = process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+  process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = "2000000";
+  try {
+    for (const [options, message] of [
+      [{ corrupt: true }, "does not match its pinned tree"],
+      [{ secret: true }, "Possible embedded secret"],
+      [{ mode: "120000" }, "Symlinks and submodules"],
+      [{ mode: "160000", type: "commit" }, "Symlinks and submodules"],
+      [{ oversized: true }, "exceeds import limits"],
+    ] as const) {
+      const fixture = gitlabFixture("example", options);
+      await withFetch(fixture, () =>
+        expect(prepareGitLabImport({ url: treeUrl })).rejects.toThrow(message),
+      );
+    }
+  } finally {
+    if (savedFileBytes === undefined)
+      delete process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+    else process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = savedFileBytes;
   }
 });
 

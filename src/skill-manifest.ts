@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import type { SkillFile } from "./shared";
+import { importMaxBytes, importMaxFiles, megabytes } from "./server/config";
 
 export const SKILLS_EXTENSION = "io.modelcontextprotocol/skills";
 export const SKILLS_SPEC_REVISION = "2026-07-28";
@@ -103,10 +104,18 @@ export function inspectSkillPackage(
   ) => issues.push({ code, path, message, severity });
   if (!UUID.test(referenceId))
     issue("reference_id", "SKILL.md", "A stable UUID is required.");
-  if (files.length > 512)
-    issue("file_count", "", "Extension portability limit is 512 files.");
-  if (files.reduce((sum, f) => sum + f.size, 0) > 16_777_216)
-    issue("package_size", "", "Extension portability limit is 16 MiB.");
+  if (files.length > importMaxFiles())
+    issue(
+      "file_count",
+      "",
+      `Extension portability limit is ${importMaxFiles()} files.`,
+    );
+  if (files.reduce((sum, f) => sum + f.size, 0) > importMaxBytes())
+    issue(
+      "package_size",
+      "",
+      `Extension portability limit is ${megabytes(importMaxBytes())}.`,
+    );
   const paths = new Set<string>();
   for (const file of files) {
     if (!validPath(file.path))
@@ -219,6 +228,12 @@ export function inspectSkillPackage(
     typeof frontmatter.license !== "string"
   )
     issue("license", "SKILL.md", "License must be a string.");
+  const allowedTools = frontmatter["allowed-tools"];
+  if (
+    Array.isArray(allowedTools) &&
+    allowedTools.every((tool) => typeof tool === "string")
+  )
+    frontmatter["allowed-tools"] = allowedTools.join(" ");
   if (
     frontmatter["allowed-tools"] !== undefined &&
     typeof frontmatter["allowed-tools"] !== "string"
@@ -233,14 +248,17 @@ export function inspectSkillPackage(
     metadata !== undefined &&
     (metadata === null ||
       typeof metadata !== "object" ||
-      Array.isArray(metadata) ||
-      Object.values(metadata).some((value) => typeof value !== "string"))
+      Array.isArray(metadata))
   )
     issue(
       "metadata",
       "SKILL.md",
       "Metadata must be a map of string keys to string values.",
     );
+  else if (metadata !== undefined)
+    for (const [key, value] of Object.entries(metadata))
+      if (typeof value !== "string")
+        (metadata as Record<string, unknown>)[key] = JSON.stringify(value);
   const compatible = !issues.some((entry) => entry.severity === "error");
   const manifest: SkillManifest | null = compatible
     ? {

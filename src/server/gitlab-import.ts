@@ -6,7 +6,13 @@ import { excludedImportPath, hasEmbeddedSecret } from "../skill-import-safety";
 import type { SkillFile, GitLabSource } from "../shared";
 import { Problem, safePath, validateFiles, metadata } from "./library";
 import { claimImport } from "./import-limit";
-import { gitlabHost } from "./config";
+import {
+  gitlabHost,
+  importLimitMessage,
+  importMaxBytes,
+  importMaxFileBytes,
+  importMaxFiles,
+} from "./config";
 import { gitlabImportToken } from "./gitlab-settings";
 
 export const gitlabImportInput = z
@@ -16,9 +22,7 @@ export const gitlabImportInput = z
   })
   .strict();
 const SHA = /^[0-9a-f]{40}$/;
-const MAX_FILES = 400,
-  MAX_BYTES = 8_000_000,
-  MAX_FILE_BYTES = 2_000_000;
+const apiResponseLimit = () => Math.max(4_000_000, importMaxFileBytes());
 type Entry = {
   path: string;
   mode: string;
@@ -146,7 +150,9 @@ export async function gitlabJson(
       throw new Problem(404, "GitLab project or ref not found");
     throw new Problem(502, "GitLab request failed");
   }
-  return JSON.parse((await boundedBytes(response, 4_000_000)).toString("utf8"));
+  return JSON.parse(
+    (await boundedBytes(response, apiResponseLimit())).toString("utf8"),
+  );
 }
 const sourceUrl = (host: string, project: string, commit: string, path: string) =>
   `https://${host}/${project}/-/tree/${commit}${path ? "/" + encodeURIComponent(path).replace(/%2F/g, "/") : ""}`;
@@ -216,7 +222,7 @@ async function resolveTarget(
       throw new Problem(502, "GitLab tree request failed");
     }
     const chunk = JSON.parse(
-      (await boundedBytes(response, 4_000_000)).toString("utf8"),
+      (await boundedBytes(response, apiResponseLimit())).toString("utf8"),
     );
     if (!Array.isArray(chunk))
       throw new Problem(502, "Invalid GitLab tree response");
@@ -332,11 +338,8 @@ const entries = resolved.entries.filter((e) => {
     throw new Problem(502, `Invalid GitLab file metadata: ${relative}`);
   return true;
 });
-if (!entries.length || entries.length > MAX_FILES)
-  throw new Problem(
-    413,
-    "Imports are limited to 400 files and 8 MB per skill",
-  );
+if (!entries.length || entries.length > importMaxFiles())
+  throw new Problem(413, importLimitMessage());
 const files: SkillFile[] = new Array(entries.length);
 let next = 0,
   total = 0;
@@ -365,13 +368,10 @@ try {
               "Could not download a pinned GitLab file",
             );
           }
-          const bytes = await boundedBytes(response, MAX_FILE_BYTES);
+          const bytes = await boundedBytes(response, importMaxFileBytes());
           total += bytes.length;
-          if (total > MAX_BYTES)
-            throw new Problem(
-              413,
-              "Imports are limited to 400 files and 8 MB per skill",
-            );
+          if (total > importMaxBytes())
+            throw new Problem(413, importLimitMessage());
           if (
             /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\n/.test(
               bytes.subarray(0, 100).toString("utf8"),

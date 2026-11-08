@@ -97,6 +97,8 @@ test("repository collections list skill directories before downloading packages"
 
 test("GitHub import fails closed on secrets, symlinks, truncation and oversized packages", async () => {
   const previous = globalThis.fetch;
+  const savedFileBytes = process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+  process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = "2000000";
   try {
     for (const [options, message] of [
       [{ secret: true }, "Possible embedded secret"],
@@ -120,5 +122,65 @@ test("GitHub import fails closed on secrets, symlinks, truncation and oversized 
     }
   } finally {
     globalThis.fetch = previous;
+    if (savedFileBytes === undefined)
+      delete process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+    else process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = savedFileBytes;
+  }
+});
+
+test("per-file import limit follows SKILLBOX_IMPORT_MAX_FILE_BYTES", async () => {
+  const previous = globalThis.fetch;
+  const savedFileBytes = process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+  const url = `https://github.com/fixture/skills/tree/${IMPORT_COMMIT}/skills/example`;
+  try {
+    process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = "2000000";
+    globalThis.fetch = githubFixture("example", {
+      bigFile: 2_500_000,
+    }).fetcher;
+    await expect(prepareGitHubImport({ url })).rejects.toThrow(
+      "File exceeds 2 MB or has invalid metadata",
+    );
+    process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = "4000000";
+    globalThis.fetch = githubFixture("example", {
+      bigFile: 2_500_000,
+    }).fetcher;
+    const result = await prepareGitHubImport({ url });
+    expect(result.kind).toBe("skill");
+    if (result.kind === "skill")
+      expect(
+        result.files.some((file) => file.path === "assets/big.bin"),
+      ).toBe(true);
+  } finally {
+    globalThis.fetch = previous;
+    if (savedFileBytes === undefined)
+      delete process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES;
+    else process.env.SKILLBOX_IMPORT_MAX_FILE_BYTES = savedFileBytes;
+  }
+});
+
+test("import limits follow SKILLBOX_IMPORT_MAX_* environment settings", async () => {
+  const previous = globalThis.fetch;
+  const savedFiles = process.env.SKILLBOX_IMPORT_MAX_FILES;
+  const savedBytes = process.env.SKILLBOX_IMPORT_MAX_BYTES;
+  const url = `https://github.com/fixture/skills/tree/${IMPORT_COMMIT}/skills/example`;
+  try {
+    process.env.SKILLBOX_IMPORT_MAX_FILES = "2";
+    process.env.SKILLBOX_IMPORT_MAX_BYTES = "8000000";
+    globalThis.fetch = githubFixture().fetcher;
+    await expect(prepareGitHubImport({ url })).rejects.toThrow(
+      "Imports are limited to 2 files and 8 MB per skill",
+    );
+    delete process.env.SKILLBOX_IMPORT_MAX_FILES;
+    process.env.SKILLBOX_IMPORT_MAX_BYTES = "50";
+    globalThis.fetch = githubFixture().fetcher;
+    await expect(prepareGitHubImport({ url })).rejects.toThrow(
+      "Imports are limited to 400 files",
+    );
+  } finally {
+    globalThis.fetch = previous;
+    if (savedFiles === undefined) delete process.env.SKILLBOX_IMPORT_MAX_FILES;
+    else process.env.SKILLBOX_IMPORT_MAX_FILES = savedFiles;
+    if (savedBytes === undefined) delete process.env.SKILLBOX_IMPORT_MAX_BYTES;
+    else process.env.SKILLBOX_IMPORT_MAX_BYTES = savedBytes;
   }
 });

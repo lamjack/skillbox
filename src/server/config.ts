@@ -66,3 +66,37 @@ export function gitlabHost(): string | null {
     );
   return raw;
 }
+
+function envPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0)
+    throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+export function importMaxFiles(): number {
+  return envPositiveInt("SKILLBOX_IMPORT_MAX_FILES", 400);
+}
+
+export function importMaxBytes(): number {
+  return envPositiveInt("SKILLBOX_IMPORT_MAX_BYTES", 8_000_000);
+}
+
+export function importMaxFileBytes(): number {
+  return envPositiveInt("SKILLBOX_IMPORT_MAX_FILE_BYTES", 2_000_000);
+}
+
+export function importBatchTimeoutMs(): number {
+  return envPositiveInt("SKILLBOX_IMPORT_BATCH_TIMEOUT_MS", 180_000);
+}
+
+export function megabytes(bytes: number): string {
+  const value = bytes / 1_000_000;
+  return `${Number.isInteger(value) ? value : value.toFixed(1)} MB`;
+}
+
+export function importLimitMessage(): string {
+  return `Imports are limited to ${importMaxFiles()} files and ${megabytes(importMaxBytes())} per skill`;
+}

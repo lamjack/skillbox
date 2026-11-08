@@ -49,6 +49,20 @@ test("manifest preserves frontmatter and all files without changing bytes", () =
   expect(JSON.stringify(files)).toBe(before);
 });
 
+test("non-string metadata values and allowed-tools lists are normalized to strings", () => {
+  const result = inspectSkillPackage(uuid, "example", [
+    main(
+      "name: example\ndescription: A workflow\nallowed-tools:\n  - Read\n  - Glob\nmetadata:\n  openclaw:\n    requires:\n      bins: [gws]\n  version: 2",
+    ),
+  ]);
+  expect(result.compatible).toBe(true);
+  expect(result.manifest!.frontmatter["allowed-tools"]).toBe("Read Glob");
+  expect(result.manifest!.frontmatter.metadata).toEqual({
+    openclaw: '{"requires":{"bins":["gws"]}}',
+    version: "2",
+  });
+});
+
 test("canonical resource identities round-trip and reject aliases/traversal", () => {
   const uri = skillResourceUri(uuid, "example", "refs/a b%?.md");
   expect(parseSkillResourceUri(uri)).toEqual({
@@ -78,7 +92,7 @@ test("legacy validation gaps are reported rather than repaired", () => {
     ["name: other\ndescription: Wrong ID", "name_mismatch"],
     ["name: example\ndescription: " + "x".repeat(1025), "description"],
     ["name: example\ndescription: invalid: YAML", "frontmatter_parse"],
-    ["name: example\ndescription: OK\nmetadata:\n  count: 1", "metadata"],
+    ["name: example\ndescription: OK\nmetadata: [a, b]", "metadata"],
     ["name: example\ndescription: OK\ncustom: 2026-01-01", "frontmatter_json"],
   ]) {
     const result = inspectSkillPackage(uuid, "example", [main(header)]);

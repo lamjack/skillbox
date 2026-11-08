@@ -8,6 +8,7 @@ export function githubFixture(
     mode?: string;
     truncated?: boolean;
     oversized?: boolean;
+    bigFile?: number;
   } = {},
 ) {
   const prefix = options.prefix ?? "skills/example/";
@@ -39,6 +40,12 @@ export function githubFixture(
       mode: "100644",
     },
   ];
+  if (options.bigFile)
+    files.push({
+      path: prefix + "assets/big.bin",
+      bytes: Buffer.alloc(options.bigFile),
+      mode: "100644",
+    });
   const requests: string[] = [];
   const fetcher = (async (
     input: string | URL | Request,

@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { skills } from "./schema";
 import { Problem, publish } from "./library";
+import { importBatchTimeoutMs } from "./config";
 import type { Principal } from "../shared";
 import type { GitHubSource, GitLabSource, SkillFile } from "../shared";
 
@@ -49,7 +50,7 @@ export async function runImportBatch<Ctx>(
   assemble: BatchAssemble<Ctx>,
 ) {
   const args = importBatchInput.parse(input);
-  const signal = AbortSignal.timeout(180_000);
+  const signal = AbortSignal.timeout(importBatchTimeoutMs());
   const batch = await open(args.url, signal);
   const results: {
     path: string;

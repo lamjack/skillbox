@@ -20,6 +20,12 @@ import type {
 import { expandBundles } from "./bundles";
 import { gatewayRecommender, gatewaySettings } from "./gateway";
 import {
+  importMaxBytes,
+  importMaxFileBytes,
+  importMaxFiles,
+  megabytes,
+} from "./config";
+import {
   MAX_CANDIDATES,
   recommend,
   type Candidate,
@@ -60,8 +66,11 @@ export function safePath(path: string) {
   return path;
 }
 export function validateFiles(files: SkillFile[]) {
-  if (!Array.isArray(files) || !files.length || files.length > 400)
-    throw new Problem(400, "Expected 1–400 files");
+  const maxFiles = importMaxFiles(),
+    maxBytes = importMaxBytes(),
+    maxFileBytes = importMaxFileBytes();
+  if (!Array.isArray(files) || !files.length || files.length > maxFiles)
+    throw new Problem(400, `Expected 1–${maxFiles} files`);
   let total = 0;
   const seen = new Set<string>();
   for (const f of files) {
@@ -71,10 +80,8 @@ export function validateFiles(files: SkillFile[]) {
     seen.add(key);
     if (
       typeof f.content !== "string" ||
-      f.content.length > 3_000_000 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-        f.content,
-      )
+      f.content.length > maxFileBytes * 2 ||
+      Buffer.from(f.content, "base64").toString("base64") !== f.content
     )
       throw new Problem(400, "Invalid file encoding");
     const bytes = Buffer.from(f.content, "base64");
@@ -84,13 +91,14 @@ export function validateFiles(files: SkillFile[]) {
       sha256(bytes) !== f.sha256
     )
       throw new Problem(400, "File checksum mismatch");
-    if (bytes.length > 2_000_000)
-      throw new Problem(400, "Files are limited to 2 MB");
+    if (bytes.length > maxFileBytes)
+      throw new Problem(400, `Files are limited to ${megabytes(maxFileBytes)}`);
     total += bytes.length;
     if (typeof f.executable !== "boolean")
       throw new Problem(400, "Invalid executable flag");
   }
-  if (total > 8_000_000) throw new Problem(400, "Skill is limited to 8 MB");
+  if (total > maxBytes)
+    throw new Problem(400, `Skill is limited to ${megabytes(maxBytes)}`);
   for (const p of seen)
     for (const other of seen)
       if (other.startsWith(p + "/"))
