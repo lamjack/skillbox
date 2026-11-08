@@ -379,6 +379,235 @@ function BundlesPage() {
     </main>
   );
 }
+
+type UpdateRow = {
+  id: string;
+  status: "current" | "outdated" | "missing" | "error";
+  type: "github" | "gitlab";
+  host?: string;
+  repository: string;
+  path: string;
+  storedCommit: string;
+  headCommit: string | null;
+  message?: string;
+};
+function useCheckUpdates() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{
+    checkedAt: string;
+    results: UpdateRow[];
+  } | null>(null);
+  const [checked, setChecked] = useState<string[]>([]);
+  const [batch, setBatch] = useState<
+    { path: string; id: string; status: string; message?: string }[] | null
+  >(null);
+  const check = async () => {
+    setBusy(true);
+    setError("");
+    setBatch(null);
+    try {
+      const r = await api("/imports/check-updates", {
+        method: "POST",
+        body: "{}",
+      });
+      setResult(r);
+      setChecked(
+        r.results
+          .filter((x: UpdateRow) => x.status === "outdated")
+          .map((x: UpdateRow) => x.id),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const updateSelected = async () => {
+    if (!result) return;
+    const groups = new Map<string, { row: UpdateRow; items: { path: string; id: string }[] }>();
+    for (const row of result.results)
+      if (row.status === "outdated" && checked.includes(row.id)) {
+        const key = `${row.type}|${row.host ?? ""}|${row.repository}`;
+        let group = groups.get(key);
+        if (!group) groups.set(key, (group = { row, items: [] }));
+        group.items.push({ path: row.path, id: row.id });
+      }
+    setBusy(true);
+    setError("");
+    try {
+      const merged: { path: string; id: string; status: string; message?: string }[] = [];
+      for (const { row, items } of groups.values()) {
+        const url =
+          row.type === "github"
+            ? `https://github.com/${row.repository}/tree/${row.headCommit}`
+            : `https://${row.host}/${row.repository}/-/tree/${row.headCommit}`;
+        const r = await api(`/imports/${row.type}/publish-batch`, {
+          method: "POST",
+          body: JSON.stringify({ url, items, overwrite: true }),
+        });
+        merged.push(...r.results);
+      }
+      setBatch(merged);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const issues = result?.results.filter((r) => r.status !== "current") ?? [];
+  const outdated = issues.filter((r) => r.status === "outdated");
+  const dismiss = () => {
+    setResult(null);
+    setBatch(null);
+    setError("");
+    setChecked([]);
+  };
+  return {
+    busy,
+    error,
+    result,
+    checked,
+    setChecked,
+    batch,
+    check,
+    updateSelected,
+    dismiss,
+    issues,
+    outdated,
+  };
+}
+function CheckUpdatesPanel({
+  updates,
+}: {
+  updates: ReturnType<typeof useCheckUpdates>;
+}) {
+  const {
+    busy,
+    error,
+    result,
+    checked,
+    setChecked,
+    batch,
+    updateSelected,
+    dismiss,
+    issues,
+    outdated,
+  } = updates;
+  if (!result && !error) return null;
+  return (
+    <section className="update-panel">
+      {error && (
+        <div className="error-note" role="alert">
+          {error}
+        </div>
+      )}
+      {result && !issues.length && !error && (
+        <p role="status">All imported skills are current.</p>
+      )}
+      <div className="filters update-toolbar">
+        {!!outdated.length && (
+          <button
+            type="button"
+            className="text-button"
+            disabled={busy}
+            onClick={() => setChecked(outdated.map((r) => r.id))}
+          >
+            Select all outdated
+          </button>
+        )}
+        {!!issues.length && (
+          <Button
+            disabled={busy || !checked.length}
+            onClick={updateSelected}
+          >
+            Update selected ({checked.length})
+          </Button>
+        )}
+        <button type="button" className="text-button push" onClick={dismiss}>
+          Dismiss
+        </button>
+      </div>
+      {!!issues.length && (
+        <div className="import-updates">
+          <table className="import-table">
+            <thead>
+              <tr>
+                <th />
+                <th>Skill</th>
+                <th>Status</th>
+                <th>Source</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {issues.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    {r.status === "outdated" && (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${r.id}`}
+                        checked={checked.includes(r.id)}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setChecked(
+                            e.target.checked
+                              ? [...checked, r.id]
+                              : checked.filter((x) => x !== r.id),
+                          )
+                        }
+                      />
+                    )}
+                  </td>
+                  <td>
+                    <code>{r.id}</code>
+                  </td>
+                  <td>{r.status}</td>
+                  <td>
+                    <code>
+                      {r.repository}
+                      {r.path ? ` / ${r.path}` : ""}
+                    </code>
+                  </td>
+                  <td>{r.message ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {batch && (
+        <div className="import-updates">
+          <p role="status">
+            {batch.filter((r) => r.status === "updated").length} updated ·{" "}
+            {batch.filter((r) => r.status === "created").length} created ·{" "}
+            {
+              batch.filter(
+                (r) => r.status === "conflict" || r.status === "error",
+              ).length
+            }{" "}
+            failed
+          </p>
+          <table className="import-table">
+            <tbody>
+              {batch.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <code>{r.id}</code>
+                  </td>
+                  <td>{r.status}</td>
+                  <td>{r.message ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function LibraryPage() {
   const auth = useContext(Auth);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -424,6 +653,7 @@ function LibraryPage() {
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true);
   const input = useRef<HTMLInputElement>(null);
+  const updates = useCheckUpdates();
   useEffect(() => {
     api("/skills?metrics=true&includeArchived=true&includeDisabled=true")
       .then((r) => setSkills(r.items))
@@ -501,9 +731,18 @@ function LibraryPage() {
         </div>
         <div className="filters">
           {auth.role === "admin" && (
-            <Button variant="outline" asChild>
-              <Link to="/import/github">Import from GitHub</Link>
-            </Button>
+            <>
+              <Button variant="outline" asChild>
+                <Link to="/import/git">Import from Git</Link>
+              </Button>
+              <Button
+                variant="outline"
+                disabled={updates.busy}
+                onClick={updates.check}
+              >
+                {updates.busy ? "Checking…" : "Check for updates"}
+              </Button>
+            </>
           )}
           <Button asChild>
             <Link to="/new">
@@ -512,6 +751,7 @@ function LibraryPage() {
           </Button>
         </div>
       </header>
+      {auth.role === "admin" && <CheckUpdatesPanel updates={updates} />}
       <div className="library-toolbar">
         <div className="search-field">
           <Search size={19} />
@@ -1707,7 +1947,7 @@ const connectRoute = createRoute({
 });
 const githubImportRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/import/github",
+  path: "/import/git",
   component: GitHubImportPage,
 });
 const router = createRouter({

@@ -2406,3 +2406,39 @@ select option {
   padding: 14px 0;
   background: var(--background);
 }
+
+.update-panel {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #232b1e;
+}
+.update-toolbar {
+  margin-bottom: 4px;
+}
+.import-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.import-table th,
+.import-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.import-table code {
+  overflow-wrap: anywhere;
+}
+.text-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.push {
+  margin-left: auto;
+}

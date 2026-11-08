@@ -46,3 +46,23 @@ export function executorResourceAliases(): Record<string, string> {
   }
   return value as Record<string, string>;
 }
+
+// Bare hostname like gitlab.example.com or gitlab.example.com:8443; https only.
+const gitlabHostShape = /^[a-z0-9.-]+(?::(\d{1,5}))?$/i;
+export function gitlabHost(): string | null {
+  const raw = process.env.SKILLBOX_GITLAB_HOST?.trim().toLowerCase();
+  if (!raw) return null;
+  const match = gitlabHostShape.exec(raw);
+  const port = match?.[1] !== undefined ? Number(match[1]) : null;
+  if (
+    !match ||
+    raw.startsWith(".") ||
+    raw.endsWith(".") ||
+    raw.includes("..") ||
+    (port !== null && (port < 1 || port > 65535))
+  )
+    throw new Error(
+      "SKILLBOX_GITLAB_HOST must be a bare hostname with an optional port, e.g. gitlab.example.com:8443",
+    );
+  return raw;
+}
