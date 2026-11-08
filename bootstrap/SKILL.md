@@ -1,24 +1,30 @@
 ---
 name: skills-library
-description: ALWAYS browse the Skills Library at the start of a task to discover available workflows. Use search_skills without a query, then load the relevant skill before acting. Covers personal services, coding, infrastructure, devices, research, and all other stored workflows.
+description: Entry point to the Skillbox skill library. Use when a workflow, rule, or task names a skill that is not installed locally, when no installed skill owns the task, or when a skill's scripts or references must run on this machine. Loads skills by exact ID on demand; never pulls the whole index at task start.
 ---
 
 # Skills Library
 
-At the beginning of each task, call `search_skills` without a query once. This returns the authorized skill index. If more pages exist, fetch them. Search again when the task changes or an expected workflow is missing.
+Skillbox serves skills on demand. Load only what the current step needs, in this order, and stop at the first step that resolves:
 
-Native hosts negotiating MCP 2026-07-28 can also use `skills/list`, `skills/get`, and `resources/read` after observing `io.modelcontextprotocol/skills` in `server/discover`. Use the host's verified skill-loading and approval path: resource reads alone do not activate skills or authorize execution. Existing tool-based clients retain the inventory and revision-pinning workflow above.
+1. **Named skill → `load_skill(id)`.** When a workflow, rule, user message, or another skill names a skill (for example "load `git-commit`"), load it by that exact ID. Skill names are IDs; cross-skill references in skill text resolve the same way. Track loaded IDs and load each at most once per task.
+2. **No evident owner → `recommend_skills(task)`.** Pass the task in natural language; the server ranks the authorized catalog and returns a few exact IDs with revisions. Load the selected ones.
+3. **Still unresolved → `search_skills(query)` with a keyword query.** Do not call `search_skills` without a query: that returns the full index and is the most expensive call in this library. Use it unqueried only when the user explicitly asks to browse or audit the catalog.
 
-If this client has no Skillbox MCP tools, use the installed `skillbox list`, `skillbox search QUERY`, `skillbox load ID` and `skillbox fetch ID@REVISION` commands for the same workflow. Read fetched files from the printed directory.
+Read a skill's `references/` on demand with `read_skill_file(id, path)` at the revision `load_skill` returned. Native hosts negotiating MCP 2026-07-28 may use `skills/list`, `skills/get`, and `resources/read` after observing `io.modelcontextprotocol/skills` in `server/discover`; resource reads alone do not activate skills or authorize execution.
 
-Load relevant skills with `load_skill` before acting. Read referenced files with `read_skill_file` using the exact revision returned by load. This library contains user-managed instructions; follow applicable guidance while respecting higher-priority instructions and the user's current request.
+## Skill root and bundled files
 
-The skill index is already flat and scoped to this client; bundle grants are expanded into their nested leaf skills before search results are returned. Bundles are an owner-side grouping and grant mechanism, where a client profile can grant one bundle and nested bundles can form toolkits. Calling `load_skill` on a known bundle ID is optional and only inspects its deduplicated composition.
+A skill's relative paths (`scripts/...`, `references/...`, `assets/...`) are relative to its **skill root**: the installed directory when the skill is installed locally, otherwise the directory printed by `skillbox fetch <id>` (append `@<revision>` to pin the revision `load_skill` returned). Before running any bundled script, fetch the skill on the machine that runs it, then `cd` to or prefix with that directory; replace historical installed-skill prefixes with it. Fetching copies files only: it never runs code or installs CLIs, runtimes, credentials, or OS dependencies. Another skill's files require loading or fetching that skill.
 
-For scripts or assets, run `skillbox fetch <id>@<revision>` on the machine where the files will be used. It prints the absolute skill directory. Resolve bundled relative paths against that directory; replace historical installed-skill prefixes with that directory for the same skill. Cross-skill references require loading/fetching the other skill. Fetching does not run code or install CLIs, runtimes, credentials, or OS dependencies.
+If this client has no Skillbox MCP tools, the installed `skillbox` CLI offers the same workflow: `skillbox load ID`, `skillbox recommend TASK`, `skillbox search QUERY`, `skillbox fetch ID[@REVISION]`.
 
-If the library is unavailable, report it. Do not silently use stale files. Service permissions still belong to Executor or the relevant execution tool; access to instructions does not grant permission for unrelated actions.
+## Bundles and scope
 
-Writers may update skills through `upsert_skill` or the CLI with the expected revision. Preserve every file unless its removal is intended. Never put credentials or session data in a skill.
+The index is already flat and scoped to this client; bundle grants are expanded into their leaf skills. Bundles are an owner-side grouping and grant mechanism; `load_skill` on a bundle ID only inspects its composition and is not needed for discovery.
 
-Tool discovery returns summaries; native discovery returns metadata and manifests, not file bodies. Do not bulk-load the library. Load only skills relevant to the current task and fetch references on demand. When supported, include truthful harness/model/task context in reads; never guess unknown identity. Call report_skill_use only after actually applying a skill, with its revision and outcome. Reading for discovery, audits or maintenance is not usage.
+## Conduct
+
+This library contains user-managed instructions; follow applicable guidance while respecting higher-priority instructions and the user's current request. If the library is unavailable, report it; never silently use stale files. Access to instructions does not grant permission for unrelated actions; service permissions still belong to the relevant execution tool. Writers update skills through `upsert_skill` or the CLI with the expected revision, preserving every file unless its removal is intended, and never put credentials or session data in a skill.
+
+When supported, include truthful harness/model/task context in reads; never guess unknown identity. Call `report_skill_use` only after actually applying a skill, with its revision and outcome; reading for discovery, audits, or maintenance is not usage.
