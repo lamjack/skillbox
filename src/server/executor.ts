@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { seal, open } from "./secret-storage";
+import { seal, openStored, UNREADABLE } from "./secret-storage";
+import type { SecretState } from "./secret-storage";
 import { appOrigin, executorResourceAliases } from "./config";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -11,6 +12,7 @@ import { connection } from "./db";
 import { Problem } from "./library";
 type Config = {
   endpoint: string;
+  secretState?: SecretState;
   bearer?: string;
   client?: any;
   tokens?: any;
@@ -22,15 +24,22 @@ type Config = {
 async function read(): Promise<Config> {
   const [row] =
     await connection`SELECT value FROM workspace_settings WHERE id='executor'`;
-  return row
-    ? ((await open(
-        row.value as Parameters<typeof open>[0],
+  const opened = row
+    ? await openStored(
+        row.value as Parameters<typeof openStored>[0],
         "executor",
-      )) as Config)
-    : { endpoint: "" };
+      )
+    : undefined;
+  return opened !== undefined && opened !== UNREADABLE
+    ? (opened as Config)
+    : {
+        endpoint: "",
+        secretState: opened === UNREADABLE ? "unreadable" : "readable",
+      };
 }
 async function save(c: Config) {
-  await connection`INSERT INTO workspace_settings(id,value) VALUES ('executor',${JSON.stringify(await seal(c))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
+  const { secretState: _, ...stored } = c;
+  await connection`INSERT INTO workspace_settings(id,value) VALUES ('executor',${JSON.stringify(await seal(stored))}::jsonb) ON CONFLICT(id) DO UPDATE SET value=excluded.value`;
 }
 let queue = Promise.resolve();
 function serial<T>(f: () => Promise<T>): Promise<T> {
@@ -46,6 +55,8 @@ export async function executorSettings() {
   const c = await read();
   return {
     endpoint: c.endpoint,
+    configured: !!c.endpoint,
+    secretState: c.secretState ?? "readable",
     authenticated: !!(c.tokens || c.bearer),
     authMethod: c.bearer ? "token" : c.tokens ? "oauth" : "none",
   };
@@ -89,7 +100,8 @@ export async function validateExecutorResource(
     advertised.hash
   )
     throw new Error("Invalid OAuth resource");
-  const compatibility = executorResourceAliases()[server.href] === advertised.href;
+  const compatibility =
+    executorResourceAliases()[server.href] === advertised.href;
   if (
     !compatibility &&
     (server.origin !== advertised.origin ||
@@ -149,7 +161,8 @@ const timedFetch = (input: string | URL | Request, init?: RequestInit) =>
 export function authorizeExecutor(code?: string, state?: string) {
   return serial(async () => {
     const c = await read();
-    if (!c.endpoint) throw new Problem(400, "Set an Executor endpoint in Settings first");
+    if (!c.endpoint)
+      throw new Problem(400, "Set an Executor endpoint in Settings first");
     if (code) {
       if (
         !state ||

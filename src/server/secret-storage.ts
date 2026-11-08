@@ -106,3 +106,26 @@ export async function open(
   }
   return plaintext;
 }
+
+/** Returned by openStored when a value was sealed under a previous admin token. */
+export const UNREADABLE = Symbol("unreadable-secret");
+export type SecretState = "readable" | "unreadable";
+const warned = new Set<string>();
+// A rotated SKILLBOX_ADMIN_TOKEN must not take settings or recommendations
+// down; callers treat UNREADABLE as unconfigured and a new save overwrites it.
+export async function openStored(
+  value: Sealed,
+  settingsId: string,
+): Promise<unknown | typeof UNREADABLE> {
+  try {
+    return await open(value, settingsId);
+  } catch {
+    if (!warned.has(settingsId)) {
+      warned.add(settingsId);
+      console.warn(
+        `secret-storage: "${settingsId}" was sealed under a previous SKILLBOX_ADMIN_TOKEN; treating it as unconfigured until it is saved again`,
+      );
+    }
+    return UNREADABLE;
+  }
+}
