@@ -92,6 +92,10 @@ export function importBatchTimeoutMs(): number {
   return envPositiveInt("SKILLBOX_IMPORT_BATCH_TIMEOUT_MS", 180_000);
 }
 
+export function mcpResourceCatalogEnabled(): boolean {
+  return (process.env.SKILLBOX_MCP_RESOURCE_CATALOG ?? "true").trim().toLowerCase() !== "false";
+}
+
 export function mcpResourceMaxBytes(): number {
   return envPositiveInt("SKILLBOX_MCP_RESOURCE_MAX_BYTES", 8_000_000);
 }
