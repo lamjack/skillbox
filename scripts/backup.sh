@@ -14,5 +14,7 @@ if [ -f .env ]; then
 else
   echo 'No .env copied. Preserve external configuration and mounted secret files separately.' >&2
 fi
-echo "Verified PostgreSQL backup archive: backups/skillbox-$task_stamp.dump"
+keep="${SKILLBOX_BACKUP_KEEP:-14}"
+for ext in dump env; do ls -1t backups/skillbox-*."$ext" 2>/dev/null | tail -n +$((keep + 1)) | xargs rm -f; done
+echo "Verified PostgreSQL backup archive: backups/skillbox-$task_stamp.dump (keeping newest $keep)"
 echo 'Validate recovery by restoring into a separate instance. Never publish backups or their matching configuration.'
