@@ -73,6 +73,19 @@ export function safePath(path: string) {
     throw new Problem(400, "Invalid file path");
   return path;
 }
+const BASE64_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// Equivalent to Buffer round-trip equality without allocating a re-encoded copy.
+function canonicalBase64(s: string) {
+  if (s.length % 4) return false;
+  if (!/^[A-Za-z0-9+/]*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(s))
+    return false;
+  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  if (!pad) return true;
+  // Unused trailing bits must be zero, or the decoder silently drops them.
+  const last = BASE64_ALPHABET.indexOf(s[s.length - pad - 1]);
+  return (last & (pad === 2 ? 0x0f : 0x03)) === 0;
+}
 // verified paths were matched against a stored listing (path, sha256, size) by
 // resolveFileReferences; their bytes are already in the blob store and are not
 // re-checked, so binary references never need to be loaded at all.
@@ -106,15 +119,11 @@ export function validateFiles(
     if (
       typeof f.content !== "string" ||
       f.content.length > maxFileBytes * 2 ||
-      Buffer.from(f.content, "base64").toString("base64") !== f.content
+      !canonicalBase64(f.content)
     )
       throw new Problem(400, "Invalid file encoding");
     const bytes = Buffer.from(f.content, "base64");
-    if (
-      bytes.toString("base64") !== f.content ||
-      bytes.length !== f.size ||
-      sha256(bytes) !== f.sha256
-    )
+    if (bytes.length !== f.size || sha256(bytes) !== f.sha256)
       throw new Problem(400, "File checksum mismatch");
     if (bytes.length > maxFileBytes)
       throw new Problem(400, `Files are limited to ${megabytes(maxFileBytes)}`);
