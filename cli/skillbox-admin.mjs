@@ -24,11 +24,16 @@ const token = config.token;
 if (!base || typeof token !== "string" || !token)
   die("admin.json must contain url and token");
 
-async function request(method, path, body) {
+const envTimeout = Number.parseInt(process.env.SKILLBOX_ADMIN_TIMEOUT_MS ?? "", 10);
+const REQUEST_TIMEOUT_MS = envTimeout > 0 ? envTimeout : 30_000;
+// The server bounds check-updates at 180 s; wait past that for its answer.
+const CHECK_UPDATES_TIMEOUT_MS = Math.max(REQUEST_TIMEOUT_MS, 200_000);
+
+async function request(method, path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   const r = await fetch(base + path, {
     method,
     redirect: "error",
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       Authorization: "Bearer " + token,
       "Content-Type": "application/json",
@@ -409,7 +414,8 @@ const TOOLS = [
     name: "check_updates",
     description: "Compare imported skills against their remote repositories.",
     inputSchema: obj(),
-    run: () => request("POST", "/api/imports/check-updates", {}),
+    run: () =>
+      request("POST", "/api/imports/check-updates", {}, CHECK_UPDATES_TIMEOUT_MS),
   },
 ];
 

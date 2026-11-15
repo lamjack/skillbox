@@ -62,11 +62,15 @@ afterAll(async () => {
   await db.delete(skills).where(like(skills.id, "admin-cli-%"));
 });
 
-async function rpc(messages: object[], config = configPath) {
+async function rpc(
+  messages: object[],
+  config = configPath,
+  env: Record<string, string> = {},
+) {
   const input =
     messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
   const proc = Bun.spawn(["node", "cli/skillbox-admin.mjs", "mcp"], {
-    env: { ...process.env, SKILLBOX_ADMIN_CONFIG: config },
+    env: { ...process.env, SKILLBOX_ADMIN_CONFIG: config, ...env },
     cwd: new URL("..", import.meta.url).pathname,
     stdin: Buffer.from(input),
     stdout: "pipe",
@@ -211,6 +215,38 @@ test(
   },
   90_000,
 );
+
+test("check_updates outlasts the default request timeout", async () => {
+  const slow = Bun.serve({
+    port: 0,
+    fetch: async () => {
+      await Bun.sleep(500);
+      return Response.json({ results: [] });
+    },
+  });
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "skillbox-admin-slow-"));
+    const slowConfig = join(dir, "admin.json");
+    writeFileSync(
+      slowConfig,
+      JSON.stringify({ url: `http://127.0.0.1:${slow.port}`, token: "slow" }),
+      { mode: 0o600 },
+    );
+    const msgs = await rpc(
+      [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_profiles", arguments: {} } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "check_updates", arguments: {} } },
+      ],
+      slowConfig,
+      { SKILLBOX_ADMIN_TIMEOUT_MS: "100" },
+    );
+    expect(msgs[1].result.isError).toBe(true);
+    expect(msgs[2].result.isError).toBeFalsy();
+    expect(JSON.parse(msgs[2].result.content[0].text)).toEqual({ results: [] });
+  } finally {
+    slow.stop();
+  }
+});
 
 test("refuses a config file that is not mode 0600", async () => {
   const dir = mkdtempSync(join(tmpdir(), "skillbox-admin-bad-"));
